@@ -48,7 +48,10 @@ import {
   waitForWorkerReady,
   waitForWorkerReadyAsync,
   paneIsBootstrapping,
+  classifyWorkerStartupInjectSafety,
+  checkWorkerStartupInjectSafety,
   dismissTrustPromptIfPresent,
+  evaluateStartupDirectTriggerSafetyCapture,
   mitigateCopyModeUnderlineArtifacts,
 } from '../tmux-session.js';
 import { HUD_RESIZE_RECONCILE_DELAY_SECONDS, HUD_TMUX_TEAM_HEIGHT_LINES } from '../../hud/constants.js';
@@ -337,6 +340,32 @@ describe('HUD resize hook command builders', () => {
   });
 });
 
+
+describe('evaluateStartupDirectTriggerSafetyCapture', () => {
+  it('allows startup direct triggers on a ready prompt or Codex viewport', () => {
+    assert.deepEqual(evaluateStartupDirectTriggerSafetyCapture(READY_HELPER_CAPTURE, 'codex'), {
+      safe: true,
+      reason: 'ready_prompt',
+    });
+    assert.deepEqual(evaluateStartupDirectTriggerSafetyCapture(VIEWPORT_WITHOUT_VISIBLE_PROMPT_CAPTURE, 'codex'), {
+      safe: true,
+      reason: 'codex_viewport',
+    });
+  });
+
+  it('blocks startup direct triggers through trust and Claude bypass prompts', () => {
+    assert.deepEqual(evaluateStartupDirectTriggerSafetyCapture(`Do you trust the contents of this directory?
+Press enter to continue`, 'codex'), {
+      safe: false,
+      reason: 'trust_prompt',
+    });
+    assert.deepEqual(evaluateStartupDirectTriggerSafetyCapture(CLAUDE_BYPASS_PROMPT_CAPTURE, 'claude'), {
+      safe: false,
+      reason: 'claude_bypass_prompt',
+    });
+  });
+});
+
 describe('sendToWorker validation', () => {
   it('rejects text over 200 chars', async () => {
     await assert.rejects(
@@ -574,6 +603,52 @@ esac
           enterCount >= 4,
           `expected repeated submit nudges before failing closed on stuck queued banner:\n${log}`,
         );
+      },
+    );
+  });
+});
+
+describe('startup direct trigger safety', () => {
+  it('classifies ready panes as safe and blocks trust, bypass, bootstrapping, and active-task captures', () => {
+    assert.equal(classifyWorkerStartupInjectSafety(READY_HELPER_CAPTURE), 'safe');
+    assert.equal(
+      classifyWorkerStartupInjectSafety('Do you trust the contents of this directory?\nPress enter to continue'),
+      'trust_prompt',
+    );
+    assert.equal(classifyWorkerStartupInjectSafety(CLAUDE_BYPASS_PROMPT_CAPTURE), 'claude_bypass_prompt');
+    assert.equal(classifyWorkerStartupInjectSafety('OpenAI Codex\nmodel: loading'), 'bootstrapping');
+    assert.equal(
+      classifyWorkerStartupInjectSafety('OpenAI Codex\nmodel: test\n• Running tests (esc to interrupt)'),
+      'active_task',
+    );
+  });
+
+  it('checks visible pane first and refuses direct injection through a trust prompt', async () => {
+    await withMockTmuxFixture(
+      'omx-tmux-startup-direct-trust-',
+      (logPath) => `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "${logPath}"
+case "$1" in
+  capture-pane)
+    cat <<'EOF'
+Do you trust the contents of this directory?
+Press enter to continue
+EOF
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`,
+      async ({ logPath }) => {
+        assert.deepEqual(
+          await checkWorkerStartupInjectSafety('omx-team-x', 1),
+          { safe: false, reason: 'trust_prompt' },
+        );
+        const log = await readFile(logPath, 'utf-8');
+        assert.doesNotMatch(log, /send-keys/);
       },
     );
   });
@@ -2847,6 +2922,103 @@ esac
     await withEmptyPath(async () => {
       assert.equal(await waitForWorkerReadyAsync('omx-team-x', 1, 1), false);
     });
+  });
+});
+
+describe('createTeamSession tmux instance tagging', () => {
+  it('tags leader, worker, and HUD panes with pane-scoped instance ownership', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-pane-tags-'));
+    const prevTmux = process.env.TMUX;
+    const prevTmuxPane = process.env.TMUX_PANE;
+    const prevSessionId = process.env.OMX_SESSION_ID;
+    const prevWorkerCli = process.env.OMX_TEAM_WORKER_CLI;
+    try {
+      await withMockTmuxFixture(
+        'omx-tmux-pane-tags-',
+        (logPath) => `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "${logPath}"
+case "\${1:-}" in
+  -V)
+    echo "tmux 3.4"
+    exit 0
+    ;;
+  display-message)
+    case "$*" in
+      *"#{window_width}"*)
+        echo "120"
+        ;;
+      *)
+        echo "shared:0 %1"
+        ;;
+    esac
+    exit 0
+    ;;
+  list-panes)
+    case "$*" in
+      *"pane_current_command"*)
+        printf "%%1\\tnode\\t'codex'\\n"
+        ;;
+      *)
+        printf "%%1\\n"
+        ;;
+    esac
+    exit 0
+    ;;
+  split-window)
+    case "$*" in
+      *" -h "*)
+        echo "%2"
+        ;;
+      *)
+        echo "%3"
+        ;;
+    esac
+    exit 0
+    ;;
+  set-option|resize-pane|select-layout|set-window-option|select-pane|set-hook|run-shell)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+        `,
+        async ({ logPath }) => {
+          const fakeBinDir = join(logPath, '..');
+          const geminiPath = join(fakeBinDir, 'gemini');
+          await writeFile(geminiPath, '#!/bin/sh\nexit 0\n');
+          await chmod(geminiPath, 0o755);
+
+          process.env.TMUX = '1';
+          process.env.TMUX_PANE = '%1';
+          process.env.OMX_SESSION_ID = 'omx-pane-scope';
+          process.env.OMX_TEAM_WORKER_CLI = 'gemini';
+
+          const session = createTeamSession('Pane Tags', 1, cwd);
+          assert.equal(session.name, 'shared:0');
+          assert.equal(session.leaderPaneId, '%1');
+          assert.deepEqual(session.workerPaneIds, ['%2']);
+          assert.equal(session.hudPaneId, '%3');
+
+          const tmuxLog = await readFile(logPath, 'utf-8');
+          assert.match(tmuxLog, /set-option -t shared @omx_instance_id omx-pane-scope/);
+          assert.match(tmuxLog, /set-option -p -t %1 @omx_pane_instance_id omx-pane-scope/);
+          assert.match(tmuxLog, /set-option -p -t %2 @omx_pane_instance_id omx-pane-scope/);
+          assert.match(tmuxLog, /set-option -p -t %3 @omx_pane_instance_id omx-pane-scope/);
+        },
+      );
+    } finally {
+      if (typeof prevTmux === 'string') process.env.TMUX = prevTmux;
+      else delete process.env.TMUX;
+      if (typeof prevTmuxPane === 'string') process.env.TMUX_PANE = prevTmuxPane;
+      else delete process.env.TMUX_PANE;
+      if (typeof prevSessionId === 'string') process.env.OMX_SESSION_ID = prevSessionId;
+      else delete process.env.OMX_SESSION_ID;
+      if (typeof prevWorkerCli === 'string') process.env.OMX_TEAM_WORKER_CLI = prevWorkerCli;
+      else delete process.env.OMX_TEAM_WORKER_CLI;
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
 });
 

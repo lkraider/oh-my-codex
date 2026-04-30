@@ -1,7 +1,7 @@
 import { afterEach, describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, utimesSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, readdir as fsReaddir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir as fsReaddir, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -16,6 +16,8 @@ import {
   resolveCliInvocation,
   commandOwnsLocalHelp,
   resolveCodexLaunchPolicy,
+  resolveEffectiveLeaderLaunchPolicyOverride,
+  resolveEnvLaunchPolicyOverride,
   resolveLeaderLaunchPolicyOverride,
   classifyCodexExecFailure,
   resolveSignalExitCode,
@@ -35,6 +37,8 @@ import {
   resolveCodexConfigPathForLaunch,
   resolveCodexHomeForLaunch,
   resolveProjectLocalCodexHomeForLaunch,
+  prepareCodexHomeForLaunch,
+  runtimeCodexHomePath,
   buildDetachedSessionBootstrapSteps,
   buildDetachedTmuxSessionName,
   buildDetachedSessionFinalizeSteps,
@@ -239,10 +243,24 @@ describe("normalizeCodexLaunchArgs", () => {
     ]);
   });
 
+  it("strips --direct from leader codex args", () => {
+    assert.deepEqual(normalizeCodexLaunchArgs(["--direct", "--yolo"]), [
+      "--yolo",
+    ]);
+  });
+
   it("preserves literal --tmux after -- in leader codex args", () => {
     assert.deepEqual(normalizeCodexLaunchArgs(["--", "--tmux", "--yolo"]), [
       "--",
       "--tmux",
+      "--yolo",
+    ]);
+  });
+
+  it("preserves literal --direct after -- in leader codex args", () => {
+    assert.deepEqual(normalizeCodexLaunchArgs(["--", "--direct", "--yolo"]), [
+      "--",
+      "--direct",
       "--yolo",
     ]);
   });
@@ -253,6 +271,24 @@ describe("resolveLeaderLaunchPolicyOverride", () => {
     assert.equal(
       resolveLeaderLaunchPolicyOverride(["--tmux", "--model", "gpt-5"]),
       "detached-tmux",
+    );
+  });
+
+  it("detects explicit direct launch requests", () => {
+    assert.equal(
+      resolveLeaderLaunchPolicyOverride(["--direct", "--model", "gpt-5"]),
+      "direct",
+    );
+  });
+
+  it("uses the last CLI launch policy flag before --", () => {
+    assert.equal(
+      resolveLeaderLaunchPolicyOverride(["--direct", "--tmux"]),
+      "detached-tmux",
+    );
+    assert.equal(
+      resolveLeaderLaunchPolicyOverride(["--tmux", "--direct"]),
+      "direct",
     );
   });
 
@@ -267,6 +303,68 @@ describe("resolveLeaderLaunchPolicyOverride", () => {
     assert.equal(
       resolveLeaderLaunchPolicyOverride(["--", "--tmux", "--model", "gpt-5"]),
       undefined,
+    );
+  });
+
+  it("stops scanning for --direct after the end-of-options marker", () => {
+    assert.equal(
+      resolveLeaderLaunchPolicyOverride(["--", "--direct", "--model", "gpt-5"]),
+      undefined,
+    );
+  });
+});
+
+describe("resolveEnvLaunchPolicyOverride", () => {
+  it("accepts direct, tmux, detached-tmux, auto, and empty policy values", () => {
+    assert.equal(resolveEnvLaunchPolicyOverride({ OMX_LAUNCH_POLICY: "direct" }), "direct");
+    assert.equal(
+      resolveEnvLaunchPolicyOverride({ OMX_LAUNCH_POLICY: "tmux" }),
+      "detached-tmux",
+    );
+    assert.equal(
+      resolveEnvLaunchPolicyOverride({ OMX_LAUNCH_POLICY: "detached-tmux" }),
+      "detached-tmux",
+    );
+    assert.equal(resolveEnvLaunchPolicyOverride({ OMX_LAUNCH_POLICY: "auto" }), undefined);
+    assert.equal(resolveEnvLaunchPolicyOverride({ OMX_LAUNCH_POLICY: "" }), undefined);
+  });
+
+  it("warns once for invalid OMX_LAUNCH_POLICY and falls back to auto", () => {
+    const warn = mock.method(console, "warn", () => {});
+    assert.equal(
+      resolveEnvLaunchPolicyOverride({ OMX_LAUNCH_POLICY: "banana" }),
+      undefined,
+    );
+    assert.equal(
+      resolveEnvLaunchPolicyOverride({ OMX_LAUNCH_POLICY: "banana" }),
+      undefined,
+    );
+    assert.equal(warn.mock.callCount(), 1);
+  });
+});
+
+describe("resolveEffectiveLeaderLaunchPolicyOverride", () => {
+  it("uses env policy when no CLI policy flag is present", () => {
+    assert.equal(
+      resolveEffectiveLeaderLaunchPolicyOverride(["--yolo"], {
+        OMX_LAUNCH_POLICY: "direct",
+      }),
+      "direct",
+    );
+  });
+
+  it("lets CLI policy flags override OMX_LAUNCH_POLICY", () => {
+    assert.equal(
+      resolveEffectiveLeaderLaunchPolicyOverride(["--tmux", "--yolo"], {
+        OMX_LAUNCH_POLICY: "direct",
+      }),
+      "detached-tmux",
+    );
+    assert.equal(
+      resolveEffectiveLeaderLaunchPolicyOverride(["--direct", "--yolo"], {
+        OMX_LAUNCH_POLICY: "tmux",
+      }),
+      "direct",
     );
   });
 });
@@ -1052,15 +1150,56 @@ describe("resolveCliInvocation", () => {
   it("advertises the explicit update command in top-level help", () => {
     assert.match(HELP, /omx update\s+Check npm now, update the global install immediately, then refresh setup/);
   });
+
+  it("advertises direct launch policy controls in top-level help", () => {
+    assert.match(HELP, /--direct\s+Launch the interactive leader directly/);
+    assert.match(HELP, /OMX_LAUNCH_POLICY=direct\|tmux\|detached-tmux\|auto/);
+    assert.match(HELP, /unset OMX_LAUNCH_POLICY/);
+    assert.match(HELP, /omx --direct --yolo/);
+    assert.match(HELP, /OMX_LAUNCH_POLICY=direct omx --tmux --yolo/);
+    assert.match(HELP, /Config files are intentionally not used/);
+  });
 });
 
 describe("resolveSetupInstallModeArg", () => {
-  it("maps --plugin to plugin install mode", () => {
+  it("maps explicit setup install mode flags", () => {
     assert.equal(resolveSetupInstallModeArg(["--dry-run"]), undefined);
     assert.equal(resolveSetupInstallModeArg(["--plugin"]), "plugin");
+    assert.equal(resolveSetupInstallModeArg(["--legacy"]), "legacy");
+    assert.equal(
+      resolveSetupInstallModeArg(["--install-mode", "legacy"]),
+      "legacy",
+    );
+    assert.equal(
+      resolveSetupInstallModeArg(["--install-mode=plugin"]),
+      "plugin",
+    );
     assert.equal(
       resolveSetupInstallModeArg(["--scope", "project", "--plugin"]),
       "plugin",
+    );
+  });
+
+  it("rejects invalid setup install mode flags", () => {
+    assert.throws(
+      () => resolveSetupInstallModeArg(["--install-mode"]),
+      /Missing setup install mode value after --install-mode/,
+    );
+    assert.throws(
+      () => resolveSetupInstallModeArg(["--install-mode", "workspace"]),
+      /Invalid setup install mode: workspace/,
+    );
+    assert.throws(
+      () => resolveSetupInstallModeArg(["--plugin", "--legacy"]),
+      /Conflicting setup install mode flags/,
+    );
+    assert.throws(
+      () => resolveSetupInstallModeArg(["--plugin", "--install-mode", "legacy"]),
+      /Conflicting setup install mode flags/,
+    );
+    assert.throws(
+      () => resolveSetupInstallModeArg(["--legacy", "--install-mode=plugin"]),
+      /Conflicting setup install mode flags/,
     );
   });
 });
@@ -1222,6 +1361,78 @@ describe("project launch scope helpers", () => {
     }
   });
 
+  it("uses a session-scoped CODEX_HOME mirror for project launch config writes", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-launch-runtime-codex-home-"));
+    try {
+      const projectCodexHome = join(wd, ".codex");
+      const configPath = join(projectCodexHome, "config.toml");
+      await mkdir(join(wd, ".omx"), { recursive: true });
+      await mkdir(join(projectCodexHome, "agents"), { recursive: true });
+      await writeFile(
+        join(wd, ".omx", "setup-scope.json"),
+        JSON.stringify({ scope: "project" }),
+      );
+      const originalConfig = [
+        'model = "gpt-5.5"',
+        "",
+        "[tui]",
+        'status_line = ["model-with-reasoning", "git-branch"]',
+        "",
+      ].join("\n");
+      await writeFile(configPath, originalConfig);
+      await writeFile(join(projectCodexHome, "agents", "planner.toml"), 'name = "planner"\n');
+      const beforeStat = await stat(configPath);
+
+      const prepared = await prepareCodexHomeForLaunch(wd, "session-2033", {});
+      const runtimeCodexHome = runtimeCodexHomePath(wd, "session-2033");
+
+      assert.equal(prepared.codexHomeOverride, runtimeCodexHome);
+      assert.equal(prepared.projectLocalCodexHomeForCleanup, projectCodexHome);
+      assert.equal(prepared.runtimeCodexHomeForCleanup, runtimeCodexHome);
+      assert.equal(await readFile(join(runtimeCodexHome, "config.toml"), "utf-8"), originalConfig);
+      assert.equal(
+        await readFile(join(runtimeCodexHome, "agents", "planner.toml"), "utf-8"),
+        'name = "planner"\n',
+      );
+
+      await writeFile(
+        join(runtimeCodexHome, "config.toml"),
+        `${originalConfig}\n[tui.model_availability_nux]\n"gpt-5.5" = 1\n`,
+      );
+
+      assert.equal(await readFile(configPath, "utf-8"), originalConfig);
+      assert.doesNotMatch(await readFile(configPath, "utf-8"), /model_availability_nux/);
+      assert.equal((await stat(configPath)).mtimeMs, beforeStat.mtimeMs);
+
+      await prepareCodexHomeForLaunch(wd, "session-2033-repeat", {});
+      assert.equal(await readFile(configPath, "utf-8"), originalConfig);
+      assert.equal((await stat(configPath)).mtimeMs, beforeStat.mtimeMs);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps explicit CODEX_HOME persistent instead of creating a runtime mirror", async () => {
+    const wd = await mkdtemp(join(tmpdir(), "omx-launch-runtime-codex-home-"));
+    try {
+      await mkdir(join(wd, ".omx"), { recursive: true });
+      await writeFile(
+        join(wd, ".omx", "setup-scope.json"),
+        JSON.stringify({ scope: "project" }),
+      );
+
+      const prepared = await prepareCodexHomeForLaunch(wd, "session-explicit", {
+        CODEX_HOME: "/tmp/explicit-codex-home",
+      });
+
+      assert.equal(prepared.codexHomeOverride, "/tmp/explicit-codex-home");
+      assert.equal(prepared.projectLocalCodexHomeForCleanup, undefined);
+      assert.equal(prepared.runtimeCodexHomeForCleanup, undefined);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
   it("keeps explicit CODEX_HOME override from env", async () => {
     const wd = await mkdtemp(join(tmpdir(), "omx-launch-scope-"));
     try {
@@ -1357,6 +1568,66 @@ describe("resolveCodexLaunchPolicy", () => {
         "detached-tmux",
       ),
       "detached-tmux",
+    );
+  });
+
+  it("honors explicit direct launch requests outside tmux", () => {
+    assert.equal(
+      resolveCodexLaunchPolicy(
+        {},
+        "linux",
+        true,
+        false,
+        true,
+        true,
+        "direct",
+      ),
+      "direct",
+    );
+  });
+
+  it("honors explicit direct launch requests inside tmux", () => {
+    assert.equal(
+      resolveCodexLaunchPolicy(
+        { TMUX: "/tmp/tmux-1000/default,123,0" },
+        "linux",
+        true,
+        false,
+        true,
+        true,
+        "direct",
+      ),
+      "direct",
+    );
+  });
+
+  it("keeps explicit tmux policy tmux-aware inside tmux", () => {
+    assert.equal(
+      resolveCodexLaunchPolicy(
+        { TMUX: "/tmp/tmux-1000/default,123,0" },
+        "linux",
+        true,
+        false,
+        true,
+        true,
+        "detached-tmux",
+      ),
+      "inside-tmux",
+    );
+  });
+
+  it("falls back directly for explicit tmux requests when tmux is unavailable", () => {
+    assert.equal(
+      resolveCodexLaunchPolicy(
+        {},
+        "linux",
+        false,
+        false,
+        true,
+        true,
+        "detached-tmux",
+      ),
+      "direct",
     );
   });
 
@@ -1594,12 +1865,21 @@ describe("detached tmux new-session sequencing", () => {
       "sess-detached-managed",
     );
     const newSession = steps.find((step) => step.name === "new-session");
+    const tagSession = steps.find((step) => step.name === "tag-session");
     assert.ok(newSession);
+    assert.ok(tagSession);
     assert.equal(
       newSession!.args.includes("-e") &&
         newSession!.args.some((arg) => arg === "OMX_SESSION_ID=sess-detached-managed"),
       true,
     );
+    assert.deepEqual(tagSession!.args, [
+      "set-option",
+      "-t",
+      "omx-demo",
+      "@omx_instance_id",
+      "sess-detached-managed",
+    ]);
   });
 
   it("buildDetachedSessionBootstrapSteps forwards CODEX_HOME override to detached tmux session", () => {
@@ -1690,6 +1970,37 @@ describe("detached tmux new-session sequencing", () => {
     assert.match(leaderCmd!, /tmux kill-session -t/);
     assert.match(leaderCmd!, /"omx-demo"/);
     assert.match(leaderCmd!, /exit \$status/);
+  });
+
+  it("buildDetachedSessionBootstrapSteps finalizes postLaunch inside the detached leader when a session id is available", () => {
+    const steps = buildDetachedSessionBootstrapSteps(
+      "omx-demo",
+      "/tmp/project",
+      "'codex' '--model' 'gpt-5'",
+      "'node' '/tmp/omx.js' 'hud' '--watch'",
+      null,
+      "/tmp/codex-home",
+      null,
+      false,
+      "omx-session-123",
+      "/tmp/project/.codex-project",
+      "/tmp/project/.omx/runtime/codex-home/omx-session-123",
+    );
+    const leaderCmd = steps[0]?.args.at(-1);
+    assert.equal(typeof leaderCmd, "string");
+    assert.match(leaderCmd!, /runDetachedSessionPostLaunch/);
+    assert.match(leaderCmd!, /omx-session-123/);
+    assert.match(leaderCmd!, /\/tmp\/codex-home/);
+    assert.match(leaderCmd!, /\/tmp\/project\/\.codex-project/);
+    assert.match(leaderCmd!, /\/tmp\/project\/\.omx\/runtime\/codex-home\/omx-session-123/);
+    const helperIndex = leaderCmd!.indexOf("runDetachedSessionPostLaunch");
+    const signalGateIndex = leaderCmd!.indexOf('if [ "$status" -lt 128 ]');
+    assert.ok(helperIndex >= 0);
+    assert.ok(signalGateIndex >= 0);
+    assert.ok(
+      helperIndex < signalGateIndex,
+      "detached postLaunch helper must run before the signal-derived tmux kill-session gate",
+    );
   });
 
   it("detached leader command keeps stdin open for the Codex child", async () => {
@@ -2121,6 +2432,72 @@ exit 0
       ["show-options", "-sv", "extended-keys"],
       ["run"],
     ]);
+  });
+
+  it("withTmuxExtendedKeys ignores tmux versions without the extended-keys option", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-tmux-lease-unsupported-"));
+    const calls: string[][] = [];
+    const stderrWrite = mock.method(process.stderr, "write", () => true);
+    try {
+      const result = withTmuxExtendedKeys(
+        cwd,
+        () => {
+          calls.push(["run"]);
+          return "ok";
+        },
+        (_file, args) => {
+          calls.push([...args]);
+          if (args[0] === "display-message") return "/tmp/tmux-3-0.sock\n";
+          if (args[0] === "show-options") {
+            throw Object.assign(new Error("Command failed: tmux show-options -sv extended-keys"), {
+              status: 1,
+              stderr: Buffer.from("invalid option: extended-keys\n"),
+              stdout: Buffer.from(""),
+            });
+          }
+          return "";
+        },
+      );
+
+      assert.equal(result, "ok");
+      assert.deepEqual(calls, [
+        ["display-message", "-p", "#{socket_path}"],
+        ["show-options", "-sv", "extended-keys"],
+        ["run"],
+      ]);
+      assert.equal(stderrWrite.mock.callCount(), 0);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("acquireTmuxExtendedKeysLease returns no lease when extended-keys is unsupported", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "omx-tmux-acquire-unsupported-"));
+    const calls: string[][] = [];
+    const stderrWrite = mock.method(process.stderr, "write", () => true);
+    try {
+      const lease = acquireTmuxExtendedKeysLease(cwd, (_file, args) => {
+        calls.push([...args]);
+        if (args[0] === "display-message") return "/tmp/tmux-3-0.sock\n";
+        if (args[0] === "show-options") {
+          throw Object.assign(new Error("Command failed: tmux show-options -sv extended-keys"), {
+            status: 1,
+            stderr: Buffer.from("invalid option: extended-keys\n"),
+            stdout: Buffer.from(""),
+          });
+        }
+        return "";
+      });
+
+      assert.equal(lease, null);
+      assert.deepEqual(calls, [
+        ["display-message", "-p", "#{socket_path}"],
+        ["show-options", "-sv", "extended-keys"],
+      ]);
+      assert.equal(stderrWrite.mock.callCount(), 0);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
 
   it("reapStaleNotifyFallbackWatcher skips kill when process identity does not match a watcher", async () => {

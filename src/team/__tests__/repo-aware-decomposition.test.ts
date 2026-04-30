@@ -30,7 +30,7 @@ describe('buildRepoAwareTeamExecutionPlan', () => {
     assert.equal(plan.tasks[0].subject, 'legacy');
   });
 
-  it('imports DAG sidecar, reduces implicit worker count, and preserves dependencies', () => {
+  it('imports DAG sidecar, reduces implicit worker count, and preserves symbolic dependencies for runtime remap', () => {
     const cwd = repo();
     writeFileSync(join(cwd, '.omx', 'plans', 'team-dag-demo.json'), JSON.stringify({
       schema_version: 1,
@@ -46,8 +46,11 @@ describe('buildRepoAwareTeamExecutionPlan', () => {
     assert.equal(plan.metadata?.decomposition_source, 'dag_sidecar');
     assert.equal(plan.workerCount, 2);
     assert.equal(plan.tasks.length, 2);
-    assert.deepEqual(plan.tasks[1].blocked_by, ['1']);
-    assert.equal(plan.metadata?.node_id_to_task_id?.impl, '1');
+    assert.deepEqual(plan.tasks[1].blocked_by, undefined);
+    assert.deepEqual(plan.tasks[1].depends_on, undefined);
+    assert.deepEqual(plan.tasks[1].symbolic_depends_on, ['impl']);
+    assert.equal(plan.metadata?.node_id_to_task_id, undefined);
+    assert.deepEqual(plan.metadata?.node_dependencies?.tests, ['impl']);
     assert.match(plan.tasks[0].description, /File scope: src\/team\/runtime.ts/);
   });
 
@@ -118,6 +121,53 @@ describe('buildRepoAwareTeamExecutionPlan', () => {
     assert.equal(plan.metadata?.decomposition_source, 'legacy_text');
     assert.equal(plan.metadata?.fallback_reason, 'missing_matching_test_spec');
     assert.equal(plan.tasks[0].subject, 'legacy');
+  });
+
+
+
+  it('carries approved repository context summary only when the launch gate supplies it', () => {
+    const cwd = repo();
+    writeFileSync(join(cwd, '.omx', 'plans', 'team-dag-demo.json'), JSON.stringify({
+      schema_version: 1,
+      nodes: [{ id: 'impl', subject: 'Implement', description: 'Implement from DAG' }],
+    }));
+    const plan = buildRepoAwareTeamExecutionPlan({
+      task: 'team',
+      workerCount: 3,
+      agentType: 'executor',
+      explicitAgentType: false,
+      explicitWorkerCount: false,
+      cwd,
+      buildLegacyPlan: legacy,
+      allowDagHandoff: true,
+      approvedRepositoryContextSummary: {
+        sourcePath: join(cwd, '.omx', 'plans', 'repo-context-demo.md'),
+        content: 'Approved context: runtime lives in src/team/runtime.ts',
+        truncated: false,
+      },
+    });
+
+    assert.equal(plan.metadata?.approved_context_summary?.content, 'Approved context: runtime lives in src/team/runtime.ts');
+  });
+
+  it('does not consume ambient repository context summary without an approved launch match', () => {
+    const cwd = repo();
+    writeFileSync(join(cwd, '.omx', 'plans', 'team-dag-demo.json'), JSON.stringify({
+      schema_version: 1,
+      nodes: [{ id: 'stale', subject: 'Stale', description: 'Stale DAG' }],
+    }));
+    const plan = buildRepoAwareTeamExecutionPlan({
+      task: 'fix unrelated tests',
+      workerCount: 3,
+      agentType: 'executor',
+      explicitAgentType: false,
+      explicitWorkerCount: false,
+      cwd,
+      buildLegacyPlan: legacy,
+    });
+
+    assert.equal(plan.metadata?.approved_context_summary, undefined);
+    assert.equal(plan.metadata?.fallback_reason, 'dag_handoff_not_approved_for_invocation');
   });
 
   it('honors CLI-explicit worker count beyond ready lanes', () => {

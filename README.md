@@ -118,12 +118,40 @@ Launch OMX the recommended way:
 omx --madmax --high
 ```
 
-This starts the interactive leader session directly by default.
-If you explicitly want the leader session in tmux, use:
+On macOS/Linux interactive terminals with `tmux` available, this starts the
+leader in OMX-managed detached tmux by default so the HUD/runtime panes can be
+created and recovered.
+
+If you want a one-off launch with no OMX tmux/HUD management, use `--direct`:
 
 ```bash
-omx --tmux --madmax --high
+omx --direct --yolo
 ```
+
+For a persistent shell/profile preference, set an environment policy:
+
+```bash
+OMX_LAUNCH_POLICY=direct omx --yolo
+```
+
+Return to the auto/default behavior with:
+
+```bash
+unset OMX_LAUNCH_POLICY
+```
+
+CLI policy flags win over the environment, and the last CLI policy flag before
+`--` wins:
+
+```bash
+OMX_LAUNCH_POLICY=direct omx --tmux --yolo
+```
+
+Use `OMX_LAUNCH_POLICY=direct|tmux|detached-tmux|auto`. This iteration only
+adds CLI and environment controls; it intentionally does not add a config-file
+setting. If you run `--direct` from inside an existing tmux pane, OMX will not
+create HUD splits, enable mouse mode, or wrap extended-key handling, but the
+process still runs inside that already-open terminal pane.
 
 Then try the canonical workflow:
 
@@ -200,6 +228,7 @@ These are operator/support surfaces:
   - `omx uninstall` removes OMX-managed wrappers from `.codex/hooks.json` but keeps the file when user hooks remain
 - `omx update` checks npm immediately, installs the newest global OMX build, then reruns the same interactive setup refresh path
 - fresh OMX-managed `gpt-5.5` config seeding now recommends `model_context_window = 250000` and `model_auto_compact_token_limit = 200000`, but only when those keys are missing
+- `.omx-config.json` model/env routing is documented in [the model/env routing reference](./docs/reference/omx-config-schema-routing.md); only edit keys supported by your installed OMX version
 - `omx doctor` verifies the install when something seems wrong; it does not prove that the active Codex profile can make an authenticated model call
 - `omx hud --watch` is a monitoring/status surface, not the primary user workflow
 

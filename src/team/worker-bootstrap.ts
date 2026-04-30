@@ -9,6 +9,7 @@ import {
 } from "../verification/verifier.js";
 import { codexHome, listInstalledSkillDirectories } from "../utils/paths.js";
 import { sleep } from "../utils/sleep.js";
+import type { ApprovedRepositoryContextSummary } from "../planning/artifacts.js";
 import type { TeamReminderDirective } from "./reminder-intents.js";
 import type { TaskHintSummary } from "./repo-aware-decomposition.js";
 
@@ -667,6 +668,12 @@ Subagent evidence reporting fields:
 - Subagent model: ${childModel}
 - Findings integrated: <brief bullets>
 - Serial searches before spawn: <number>
+
+Delegation compliance evidence (required for completion):
+- Include exactly one of these lines in the task completion \`result\` passed to \`omx team api transition-task-status\`:
+  - \`Subagent spawn evidence: <count, child task names/thread ids, and what findings were integrated>\`
+  - \`Subagent skip reason: <why serial execution was safer/sufficient>\`
+- Completion is rejected with \`missing_delegation_compliance_evidence\` when this broad-task evidence is absent.
 `;
 }
 
@@ -696,6 +703,7 @@ export function generateInitialInbox(
     worktreeRootAgentsCanonical?: boolean;
     approvedContextSection?: string;
     taskHints?: Record<string, TaskHintSummary>;
+    approvedContextSummary?: ApprovedRepositoryContextSummary;
   } = {},
 ): string {
   const taskList = tasks
@@ -734,10 +742,20 @@ export function generateInitialInbox(
   const teamStateRoot = options.teamStateRoot || "<team_state_root>";
   const leaderCwd = options.leaderCwd || "<leader_cwd>";
   const displayRole = options.workerRole ?? agentType;
-  const approvedContextSection = options.approvedContextSection
+  const approvedHandoffSection = options.approvedContextSection
     ? `\n## Approved Handoff Context\n\n${options.approvedContextSection}\n`
     : "";
   const delegationSection = renderDelegationContracts(tasks);
+
+  const approvedRepositoryContextSection = options.approvedContextSummary
+    ? `
+## Approved Repository Context Summary
+
+Source: ${options.approvedContextSummary.sourcePath}${options.approvedContextSummary.truncated ? ' (bounded/truncated)' : ''}
+
+${options.approvedContextSummary.content}
+`
+    : "";
 
   const specializationSection = options.worktreeRootAgentsCanonical === true
     ? ""
@@ -754,8 +772,7 @@ export function generateInitialInbox(
 ## Your Assigned Tasks
 
 ${taskList}
-${approvedContextSection}
-
+${approvedHandoffSection}${approvedRepositoryContextSection}
 ## Instructions
 
 1. Load and follow the worker skill from the first existing path:

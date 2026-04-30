@@ -43,6 +43,9 @@ export function isApprovedExecutionContextReadyStatus(status: ContextPackStatus)
   return isApprovedExecutionContextReadyStatusCore(status);
 }
 
+const APPROVED_REPOSITORY_CONTEXT_MAX_CHARS = 4_000;
+const APPROVED_REPOSITORY_CONTEXT_MAX_LINES = 80;
+
 export interface PlanningArtifacts {
   plansDir: string;
   specsDir: string;
@@ -51,6 +54,12 @@ export interface PlanningArtifacts {
   testSpecPaths: string[];
   deepInterviewSpecPaths: string[];
   contextPackPaths: string[];
+}
+
+export interface ApprovedRepositoryContextSummary {
+  sourcePath: string;
+  content: string;
+  truncated: boolean;
 }
 
 export interface ApprovedPlanContext {
@@ -63,6 +72,7 @@ export interface ApprovedPlanContext {
   contextPackIssues: string[];
   contextRefs: ContextPackExecutionRef[];
   contextRefIssues: string[];
+  repositoryContextSummary?: ApprovedRepositoryContextSummary;
 }
 
 export interface ApprovedExecutionLaunchHint extends ApprovedPlanContext {
@@ -238,6 +248,58 @@ export function readContextPackHandoffStatus(repoRoot: string, packPath: string)
   return readContextPackHandoffStatusCore(repoRoot, packPath);
 }
 
+function boundedRepositoryContextSummary(sourcePath: string, content: string): ApprovedRepositoryContextSummary | null {
+  const normalizedLines = content
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => line.trimEnd());
+  const trimmed = normalizedLines.join('\n').trim();
+  if (!trimmed) return null;
+
+  const limitedLines = normalizedLines.slice(0, APPROVED_REPOSITORY_CONTEXT_MAX_LINES);
+  const lineTruncated = normalizedLines.length > limitedLines.length;
+  let limited = limitedLines.join('\n').trim();
+  let charTruncated = false;
+  if (limited.length > APPROVED_REPOSITORY_CONTEXT_MAX_CHARS) {
+    limited = limited.slice(0, APPROVED_REPOSITORY_CONTEXT_MAX_CHARS).trimEnd();
+    charTruncated = true;
+  }
+  return { sourcePath, content: limited, truncated: lineTruncated || charTruncated };
+}
+
+function extractApprovedRepositoryContextSection(sourcePath: string, content: string): ApprovedRepositoryContextSummary | null {
+  const lines = content.replace(/\r\n/g, '\n').split('\n');
+  const headingIndex = lines.findIndex((line) => /^#{1,6}\s+Approved Repository Context Summary\s*$/i.test(line.trim()));
+  if (headingIndex < 0) return null;
+  const headingLevel = lines[headingIndex].match(/^(#+)/)?.[1].length ?? 1;
+  const body: string[] = [];
+  for (let index = headingIndex + 1; index < lines.length; index += 1) {
+    const heading = lines[index].match(/^(#{1,6})\s+/);
+    if (heading && heading[1].length <= headingLevel) break;
+    body.push(lines[index]);
+  }
+  return boundedRepositoryContextSummary(sourcePath, body.join('\n'));
+}
+
+function readApprovedRepositoryContextSummary(
+  artifacts: PlanningArtifacts,
+  prdPath: string,
+  planSlug: string | null,
+  prdContent: string,
+): ApprovedRepositoryContextSummary | null {
+  if (!planSlug) return extractApprovedRepositoryContextSection(prdPath, prdContent);
+  const sidecarPath = join(artifacts.plansDir, `repo-context-${planSlug}.md`);
+  if (existsSync(sidecarPath)) {
+    try {
+      const sidecar = boundedRepositoryContextSummary(sidecarPath, readFileSync(sidecarPath, 'utf-8'));
+      if (sidecar) return sidecar;
+    } catch {
+      // Fall through to an inline approved PRD section when the inspectable sidecar is unreadable.
+    }
+  }
+  return extractApprovedRepositoryContextSection(prdPath, prdContent);
+}
+
 function readApprovedPlanText(
   cwd: string,
   options: ApprovedExecutionLaunchHintReadOptions = {},
@@ -249,6 +311,14 @@ function readApprovedPlanText(
   if (!latestPrdPath || !existsSync(latestPrdPath)) return null;
 
   try {
+    const content = readFileSync(latestPrdPath, 'utf-8');
+    const planSlug = planningArtifactSlug(canonicalPrdPath ?? latestPrdPath, 'prd');
+    const repositoryContextSummary = readApprovedRepositoryContextSummary(
+      artifacts,
+      latestPrdPath,
+      planSlug,
+      content,
+    );
     const repoRoot = dirname(dirname(artifacts.plansDir));
     const shouldMaterializeContextRefs = options.materializeContextRefs === true;
     const refResolution = shouldMaterializeContextRefs && selection.contextPackStatus === 'ready' && canonicalPrdPath
@@ -263,7 +333,7 @@ function readApprovedPlanText(
       contextPackIssues.push(...contextRefIssues);
     }
     return {
-      content: readFileSync(latestPrdPath, 'utf-8'),
+      content,
       context: {
         sourcePath: latestPrdPath,
         testSpecPaths: selection.testSpecPaths,
@@ -274,6 +344,8 @@ function readApprovedPlanText(
         contextPackIssues,
         contextRefs: refResolution.refs,
         contextRefIssues,
+        ...(repositoryContextSummary ? { repositoryContextSummary } : {}),
+        ...(repositoryContextSummary ? { repositoryContextSummary } : {}),
       },
     };
   } catch {

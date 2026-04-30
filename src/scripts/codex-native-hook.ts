@@ -63,7 +63,8 @@ import { dispatchHookEvent } from "../hooks/extensibility/dispatcher.js";
 import { reconcileHudForPromptSubmit } from "../hud/reconcile.js";
 import { onSessionStart as buildWikiSessionStartContext } from "../wiki/lifecycle.js";
 import { readAutoresearchCompletionStatus, readAutoresearchModeState } from "../autoresearch/skill-validation.js";
-import { shouldContinueRun } from "../runtime/run-loop.js";
+import { readRunState } from "../runtime/run-state.js";
+import { getRunContinuationSnapshot, shouldContinueRun } from "../runtime/run-loop.js";
 import { triagePrompt } from "../hooks/triage-heuristic.js";
 import { readTriageConfig } from "../hooks/triage-config.js";
 import {
@@ -82,6 +83,7 @@ import {
   evaluateFinalHandoffDocumentRefresh,
   isFinalHandoffDocumentRefreshCandidate,
 } from "../document-refresh/enforcer.js";
+import { buildExecFollowupStopOutput } from "../exec/followup.js";
 
 type CodexHookEventName =
   | "SessionStart"
@@ -442,8 +444,78 @@ interface ActiveRalphStopState {
   path: string;
 }
 
+interface RalphStopOwnershipContext {
+  sessionId: string;
+  payloadSessionId: string;
+  threadId: string;
+  currentNativeSessionId: string;
+  tmuxPaneId: string;
+}
+
 function isRalphStartingPhase(state: Record<string, unknown>): boolean {
   return safeString(state.current_phase ?? state.currentPhase).trim().toLowerCase() === "starting";
+}
+
+function hasValue(values: string[], value: string): boolean {
+  return value !== "" && values.some((candidate) => candidate === value);
+}
+
+function activeRalphStateMatchesStopOwner(
+  state: Record<string, unknown>,
+  context: RalphStopOwnershipContext,
+): boolean {
+  const ownerOmxSessionId = safeString(state.owner_omx_session_id).trim();
+  if (ownerOmxSessionId && ownerOmxSessionId !== context.sessionId) {
+    return false;
+  }
+
+  const stateSessionId = safeString(state.session_id).trim();
+  if (!ownerOmxSessionId && stateSessionId && stateSessionId !== context.sessionId) {
+    return false;
+  }
+
+  const codexOwnerSessionId = safeString(state.owner_codex_session_id).trim();
+  if (codexOwnerSessionId) {
+    const stopCodexSessionIds = [
+      context.payloadSessionId,
+      context.currentNativeSessionId,
+      context.sessionId,
+    ].filter(Boolean);
+    if (!hasValue(stopCodexSessionIds, codexOwnerSessionId)) return false;
+  }
+
+  const stateThreadId = safeString(state.owner_codex_thread_id ?? state.thread_id).trim();
+  if (stateThreadId && context.threadId && stateThreadId !== context.threadId) {
+    return false;
+  }
+
+  const statePaneId = safeString(state.tmux_pane_id).trim();
+  if (statePaneId && context.tmuxPaneId && statePaneId !== context.tmuxPaneId) {
+    return false;
+  }
+
+  return true;
+}
+
+function shouldHonorCanonicalTerminalRunState(
+  runState: Record<string, unknown> | null,
+  mode: string,
+): boolean {
+  if (!runState) return false;
+  const runMode = safeString(runState.mode).trim();
+  if (runMode && runMode !== mode) return false;
+  return getRunContinuationSnapshot(runState)?.terminal === true;
+}
+
+async function readCanonicalTerminalRunStateForStop(
+  cwd: string,
+  sessionId: string | undefined,
+  mode: string,
+): Promise<Record<string, unknown> | null> {
+  if (!safeString(sessionId).trim()) return null;
+  const runState = await readRunState(cwd, sessionId).catch(() => null);
+  const runRecord = runState as unknown as Record<string, unknown> | null;
+  return shouldHonorCanonicalTerminalRunState(runRecord, mode) ? runRecord : null;
 }
 
 async function isVisibleRalphActiveForSession(cwd: string, sessionId: string): Promise<boolean> {
@@ -458,6 +530,11 @@ async function isVisibleRalphActiveForSession(cwd: string, sessionId: string): P
 async function readActiveRalphState(
   stateDir: string,
   preferredSessionId?: string,
+  ownerContext?: {
+    payloadSessionId?: string;
+    threadId?: string;
+    tmuxPaneId?: string;
+  },
 ): Promise<ActiveRalphStopState | null> {
   const cwd = resolve(stateDir, "..", "..");
   const [rawSessionInfo, usableSessionInfo] = await Promise.all([
@@ -465,6 +542,7 @@ async function readActiveRalphState(
     readUsableSessionState(cwd),
   ]);
   const currentOmxSessionId = safeString(usableSessionInfo?.session_id).trim();
+  const currentNativeSessionId = safeString(usableSessionInfo?.native_session_id).trim();
   const staleCurrentSessionId = rawSessionInfo && !isSessionStateUsable(rawSessionInfo, cwd)
     ? safeString(rawSessionInfo.session_id).trim()
     : "";
@@ -480,6 +558,9 @@ async function readActiveRalphState(
     if (staleCurrentSessionId && sessionId === staleCurrentSessionId) {
       continue;
     }
+    if (await readCanonicalTerminalRunStateForStop(cwd, sessionId, "ralph")) {
+      continue;
+    }
     const sessionScopedPath = getStateFilePath("ralph-state.json", cwd, sessionId);
     const sessionScoped = await readJsonIfExists(sessionScopedPath);
     if (
@@ -489,7 +570,17 @@ async function readActiveRalphState(
     ) {
       continue;
     }
-    if (sessionScoped?.active === true && shouldContinueRun(sessionScoped)) {
+    if (
+      sessionScoped?.active === true
+      && shouldContinueRun(sessionScoped)
+      && activeRalphStateMatchesStopOwner(sessionScoped, {
+        sessionId,
+        payloadSessionId: safeString(ownerContext?.payloadSessionId).trim(),
+        threadId: safeString(ownerContext?.threadId).trim(),
+        currentNativeSessionId,
+        tmuxPaneId: safeString(ownerContext?.tmuxPaneId).trim(),
+      })
+    ) {
       return { state: sessionScoped, path: sessionScopedPath };
     }
   }
@@ -820,10 +911,10 @@ function resolveExecutionEnvironment(
       transport: executionSurface.transport,
       surface: "attached tmux runtime - tmux",
       tmuxWorkflowGuidance: "omx team, omx hud, and omx question are directly usable in this session",
-      questionGuidance: "visible renderer available from the current pane",
+      questionGuidance: "visible temporary renderer available from the current pane; primary success JSON is answers[]",
       teamRuntimeInstruction: "Use the durable OMX team runtime via `omx team ...` for coordinated execution; do not replace it with in-process fanout.",
       teamHelpInstruction: "If you need runtime syntax, run `omx team --help` yourself.",
-      deepInterviewInstruction: "Deep-interview must ask each interview round via `omx question`; do not fall back to `request_user_input` or plain-text questioning. This session is already attached to tmux, so `omx question` can open its visible renderer directly. After starting `omx question` in a background terminal, wait for that terminal to finish and read the JSON answer before continuing the interview. Stop remains blocked while a deep-interview question obligation is pending.",
+      deepInterviewInstruction: "Deep-interview must ask each interview round via `omx question`; do not fall back to `request_user_input` or plain-text questioning. This session is already attached to tmux, so `omx question` can open its temporary renderer directly over the leader pane. After starting `omx question` in a background terminal, wait for that terminal to finish and read the JSON answer before continuing the interview. Prefer `answers[0].answer` / `answers[]`; use legacy `answer` only as fallback. Deep-interview remains one question per round, so do not batch multiple interview rounds into one `questions[]` form. Stop remains blocked while a deep-interview question obligation is pending.",
       leaderPaneHint,
     };
   }
@@ -1209,6 +1300,9 @@ async function readTeamModeStateForStop(
 }
 
 async function buildTeamStopOutput(cwd: string, sessionId?: string): Promise<Record<string, unknown> | null> {
+  if (await readCanonicalTerminalRunStateForStop(cwd, sessionId, "team")) {
+    return null;
+  }
   const teamState = await readTeamModeStateForStop(cwd, sessionId);
   if (teamState?.active !== true) return null;
   const teamName = safeString(teamState.team_name).trim();
@@ -1459,7 +1553,7 @@ async function buildDeepInterviewQuestionStopOutput(
   if (!obligationId) return null;
 
   const systemMessage =
-    `OMX deep-interview is still active (phase: ${phase}) and requires a structured question via omx question before stopping.`;
+    `OMX deep-interview is still active (phase: ${phase}) and requires a structured question via omx question before stopping; read the returned answers[] JSON before continuing.`;
 
   return {
     obligationId,
@@ -1834,7 +1928,13 @@ async function buildStopHookOutput(
   const sessionId = readPayloadSessionId(payload);
   const canonicalSessionId = await resolveInternalSessionIdForPayload(cwd, sessionId);
   const threadId = readPayloadThreadId(payload);
-  const ralphState = await readActiveRalphState(stateDir, canonicalSessionId);
+  const execFollowupOutput = await buildExecFollowupStopOutput(cwd, canonicalSessionId);
+  if (execFollowupOutput) return execFollowupOutput;
+  const ralphState = await readActiveRalphState(stateDir, canonicalSessionId, {
+    payloadSessionId: sessionId,
+    threadId,
+    tmuxPaneId: safeString(process.env.TMUX_PANE).trim(),
+  });
   if (!ralphState) {
     const autoresearchState = await readActiveAutoresearchState(cwd, canonicalSessionId);
     if (autoresearchState) {
@@ -1946,7 +2046,9 @@ async function buildStopHookOutput(
         );
       }
 
-      const canonicalTeam = await findCanonicalActiveTeamForSession(cwd, canonicalSessionId);
+      const canonicalTeam = await readCanonicalTerminalRunStateForStop(cwd, canonicalSessionId, "team")
+        ? null
+        : await findCanonicalActiveTeamForSession(cwd, canonicalSessionId);
       if (canonicalTeam) {
         const canonicalTeamOutput = buildTeamStopOutputForPhase(
           canonicalTeam.teamName,

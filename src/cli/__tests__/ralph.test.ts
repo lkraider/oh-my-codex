@@ -484,6 +484,11 @@ const approvedHint: ApprovedExecutionLaunchHint = {
     },
   ],
   contextRefIssues: [],
+  repositoryContextSummary: {
+    sourcePath: '.omx/plans/repo-context-issue-1072.md',
+    content: 'Key files: src/cli/ralph.ts and src/planning/artifacts.ts',
+    truncated: false,
+  },
 };
 
 describe('assertRequiredRalphPrdJson', () => {
@@ -628,6 +633,8 @@ describe('ralph deslop launch wiring', () => {
     assert.match(instructions, /verify context refs: acceptance=\.omx\/context\/excerpts\/context-20260420T000000Z-issue-1072\/02-acceptance\.md \[excerpt\]/i);
     assert.match(instructions, /open the pack index or query the canonical pack by role\/tag\/label/i);
     assert.match(instructions, /Carry forward the approved deep-interview requirements/i);
+    assert.match(instructions, /approved repository context summary: \.omx\/plans\/repo-context-issue-1072\.md/i);
+    assert.match(instructions, /Key files: src\/cli\/ralph\.ts and src\/planning\/artifacts\.ts/i);
   });
 
   it('does not reference a missing absolute pack index in ready handoff instructions', async () => {

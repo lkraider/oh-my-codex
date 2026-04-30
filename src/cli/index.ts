@@ -6,6 +6,7 @@
 import { execFileSync, spawn } from "child_process";
 import { basename, dirname, join } from "path";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
+import { copyFile, cp, lstat, mkdir, readdir, rm, symlink } from "fs/promises";
 import { constants as osConstants } from "os";
 import { setup, SETUP_SCOPES, type SetupInstallMode, type SetupScope } from "./setup.js";
 import { uninstall } from "./uninstall.js";
@@ -136,6 +137,7 @@ import {
   type NotifyTempContract,
   type ParseNotifyTempContractResult,
 } from "../notifications/temp-contract.js";
+import { execInjectCommand } from "../exec/followup.js";
 
 export function resolveNotifyFallbackWatcherScript(pkgRoot = getPackageRoot()): string {
   return resolveDistScript(pkgRoot, "notify-fallback-watcher.js");
@@ -157,8 +159,10 @@ export const HELP = `
 oh-my-codex (omx) - Multi-agent orchestration for Codex CLI
 
 Usage:
-  omx           Launch Codex CLI (HUD auto-attaches only when already inside tmux)
+  omx           Launch Codex CLI (detached tmux by default on supported interactive terminals)
   omx exec      Run codex exec non-interactively with OMX AGENTS/overlay injection
+  omx exec inject <session-id> --prompt <text>
+                Queue audited follow-up instructions for a running non-interactive exec job
   omx setup     Install skills, prompts, MCP servers, and scope-specific AGENTS.md
                 (user scope prompts for legacy vs plugin skill delivery when needed)
   omx update    Check npm now, update the global install immediately, then refresh setup
@@ -217,6 +221,7 @@ Options:
   --madmax-spark  spark model for workers + bypass approvals for leader and workers
                 (shorthand for: --spark --madmax)
   --notify-temp  Enable temporary notification routing for this run/session only
+  --direct       Launch the interactive leader directly without OMX tmux/HUD management
   --tmux         Launch the interactive leader session in detached tmux
   --discord      Select Discord provider for temporary notification mode
   --slack        Select Slack provider for temporary notification mode
@@ -231,11 +236,27 @@ Options:
                 instead of overwriting user-authored content
   --dry-run     Show what would be done without doing it
   --plugin      Use Codex plugin delivery for omx setup and remove legacy OMX-managed user/project components
+  --legacy      Use legacy setup delivery for omx setup, overriding persisted plugin mode
+  --install-mode <legacy|plugin>
+                Explicit setup install mode (canonical form; --legacy/--plugin are aliases)
   --keep-config Skip config.toml cleanup during uninstall
   --purge       Remove .omx/ cache directory during uninstall
   --verbose     Show detailed output
   --scope       Setup scope for "omx setup" only:
                 user | project
+
+Launch policy:
+  OMX_LAUNCH_POLICY=direct|tmux|detached-tmux|auto
+                Choose the default leader launch policy when no CLI policy flag is present
+  unset OMX_LAUNCH_POLICY
+                Return to the auto/default policy (detached tmux on supported interactive terminals)
+  omx --direct --yolo
+                Run this launch without OMX tmux/HUD management
+  OMX_LAUNCH_POLICY=direct omx --yolo
+                Use direct launch from the environment
+  OMX_LAUNCH_POLICY=direct omx --tmux --yolo
+                CLI policy flags override the environment for one launch
+  Config files are intentionally not used for launch policy in this release.
 `;
 
 const REASONING_KEY = "model_reasoning_effort";
@@ -244,6 +265,7 @@ const TEAM_WORKER_LAUNCH_ARGS_ENV = "OMX_TEAM_WORKER_LAUNCH_ARGS";
 const TEAM_INHERIT_LEADER_FLAGS_ENV = "OMX_TEAM_INHERIT_LEADER_FLAGS";
 const OMX_BYPASS_DEFAULT_SYSTEM_PROMPT_ENV = "OMX_BYPASS_DEFAULT_SYSTEM_PROMPT";
 const OMX_MODEL_INSTRUCTIONS_FILE_ENV = "OMX_MODEL_INSTRUCTIONS_FILE";
+const OMX_INSTANCE_OPTION = "@omx_instance_id";
 const OMX_RALPH_APPEND_INSTRUCTIONS_FILE_ENV =
   "OMX_RALPH_APPEND_INSTRUCTIONS_FILE";
 const OMX_AUTORESEARCH_APPEND_INSTRUCTIONS_FILE_ENV =
@@ -343,8 +365,54 @@ export interface ResolvedCliInvocation {
 }
 
 export function resolveSetupInstallModeArg(args: string[]): SetupInstallMode | undefined {
-  if (args.includes("--plugin")) return "plugin";
-  return undefined;
+  let value: SetupInstallMode | undefined;
+  const setValue = (next: SetupInstallMode, source: string): void => {
+    if (value && value !== next) {
+      throw new Error(
+        `Conflicting setup install mode flags: ${source} selects ${next}, but another flag already selected ${value}`,
+      );
+    }
+    value = next;
+  };
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--plugin") {
+      setValue("plugin", arg);
+      continue;
+    }
+    if (arg === "--legacy") {
+      setValue("legacy", arg);
+      continue;
+    }
+    if (arg === "--install-mode") {
+      const next = args[index + 1];
+      if (!next || next.startsWith("-")) {
+        throw new Error(
+          `Missing setup install mode value after --install-mode. Expected one of: legacy, plugin`,
+        );
+      }
+      if (next !== "legacy" && next !== "plugin") {
+        throw new Error(
+          `Invalid setup install mode: ${next}. Expected one of: legacy, plugin`,
+        );
+      }
+      setValue(next, arg);
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--install-mode=")) {
+      const next = arg.slice("--install-mode=".length);
+      if (next !== "legacy" && next !== "plugin") {
+        throw new Error(
+          `Invalid setup install mode: ${next}. Expected one of: legacy, plugin`,
+        );
+      }
+      setValue(next, "--install-mode");
+    }
+  }
+
+  return value;
 }
 
 export function resolveSetupScopeArg(args: string[]): SetupScope | undefined {
@@ -411,6 +479,9 @@ export function commandOwnsLocalHelp(command: CliCommand): boolean {
 
 export type CodexLaunchPolicy = "inside-tmux" | "detached-tmux" | "direct";
 
+const OMX_LAUNCH_POLICY_ENV = "OMX_LAUNCH_POLICY";
+let warnedInvalidEnvLaunchPolicy = false;
+
 function splitLeaderLaunchPolicyArgs(args: string[]): {
   explicitPolicy?: CodexLaunchPolicy;
   remainingArgs: string[];
@@ -431,6 +502,11 @@ function splitLeaderLaunchPolicyArgs(args: string[]): {
       continue;
     }
 
+    if (arg === "--direct") {
+      explicitPolicy = "direct";
+      continue;
+    }
+
     if (arg === "--tmux") {
       explicitPolicy = "detached-tmux";
       continue;
@@ -448,6 +524,36 @@ export function resolveLeaderLaunchPolicyOverride(
   return splitLeaderLaunchPolicyArgs(args).explicitPolicy;
 }
 
+export function resolveEnvLaunchPolicyOverride(
+  env: NodeJS.ProcessEnv = process.env,
+): CodexLaunchPolicy | undefined {
+  const rawValue = env[OMX_LAUNCH_POLICY_ENV]?.trim();
+  if (!rawValue) return undefined;
+
+  const value = rawValue.toLowerCase();
+  if (value === "auto") return undefined;
+  if (value === "direct") return "direct";
+  if (value === "tmux" || value === "detached-tmux") return "detached-tmux";
+
+  if (!warnedInvalidEnvLaunchPolicy) {
+    warnedInvalidEnvLaunchPolicy = true;
+    console.warn(
+      `[omx] warning: invalid ${OMX_LAUNCH_POLICY_ENV}="${rawValue}". ` +
+        "Expected direct, tmux, detached-tmux, or auto. Falling back to auto/default launch policy.",
+    );
+  }
+  return undefined;
+}
+
+export function resolveEffectiveLeaderLaunchPolicyOverride(
+  args: string[],
+  env: NodeJS.ProcessEnv = process.env,
+): CodexLaunchPolicy | undefined {
+  return (
+    resolveLeaderLaunchPolicyOverride(args) ?? resolveEnvLaunchPolicyOverride(env)
+  );
+}
+
 export function resolveCodexLaunchPolicy(
   env: NodeJS.ProcessEnv = process.env,
   _platform: NodeJS.Platform = process.platform,
@@ -457,9 +563,9 @@ export function resolveCodexLaunchPolicy(
   stdoutIsTTY: boolean = Boolean(process.stdout.isTTY),
   explicitPolicy?: CodexLaunchPolicy,
 ): CodexLaunchPolicy {
+  if (explicitPolicy === "direct") return "direct";
   if (env.TMUX) return "inside-tmux";
   if (explicitPolicy === "detached-tmux") return tmuxAvailable ? "detached-tmux" : "direct";
-  if (explicitPolicy === "direct") return "direct";
   if (_platform === "win32") return "direct";
   if (nativeWindows) return "direct";
   if (!stdinIsTTY || !stdoutIsTTY) return "direct";
@@ -473,6 +579,90 @@ type ExecFileSyncFailure = NodeJS.ErrnoException & {
 
 function resolveTmuxExecutableForLaunch(): string {
   return resolveTmuxBinaryForPlatform() || "tmux";
+}
+
+
+export interface PreparedCodexHomeForLaunch {
+  codexHomeOverride?: string;
+  projectLocalCodexHomeForCleanup?: string;
+  runtimeCodexHomeForCleanup?: string;
+}
+
+export function runtimeCodexHomePath(cwd: string, sessionId: string): string {
+  return join(cwd, ".omx", "runtime", "codex-home", sessionId);
+}
+
+async function linkOrCopyCodexHomeEntry(source: string, destination: string): Promise<void> {
+  const stat = await lstat(source);
+  try {
+    await symlink(source, destination, stat.isDirectory() && process.platform === "win32" ? "junction" : undefined);
+  } catch {
+    if (stat.isDirectory()) {
+      await cp(source, destination, { recursive: true, force: true, verbatimSymlinks: true });
+      return;
+    }
+    await copyFile(source, destination);
+  }
+}
+
+/**
+ * Project-scope setup keeps durable Codex config under <repo>/.codex, but the
+ * Codex TUI also stores model-availability NUX counters in CODEX_HOME/config.toml.
+ * Launch against a session mirror so those runtime writes never dirty the
+ * durable project config while preserving the project config as the launch input.
+ */
+export async function prepareRuntimeCodexHomeForProjectLaunch(
+  cwd: string,
+  sessionId: string,
+  projectCodexHome: string,
+): Promise<string> {
+  const runtimeCodexHome = runtimeCodexHomePath(cwd, sessionId);
+  await rm(runtimeCodexHome, { recursive: true, force: true });
+  await mkdir(runtimeCodexHome, { recursive: true });
+
+  if (!existsSync(projectCodexHome)) return runtimeCodexHome;
+
+  for (const entry of await readdir(projectCodexHome, { withFileTypes: true })) {
+    const source = join(projectCodexHome, entry.name);
+    const destination = join(runtimeCodexHome, entry.name);
+    if (entry.name === "config.toml") {
+      await copyFile(source, destination);
+      continue;
+    }
+    await linkOrCopyCodexHomeEntry(source, destination);
+  }
+
+  return runtimeCodexHome;
+}
+
+export async function prepareCodexHomeForLaunch(
+  cwd: string,
+  sessionId: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<PreparedCodexHomeForLaunch> {
+  const projectLocalCodexHomeForCleanup = resolveProjectLocalCodexHomeForLaunch(cwd, env);
+  if (projectLocalCodexHomeForCleanup) {
+    const runtimeCodexHome = await prepareRuntimeCodexHomeForProjectLaunch(
+      cwd,
+      sessionId,
+      projectLocalCodexHomeForCleanup,
+    );
+    return {
+      codexHomeOverride: runtimeCodexHome,
+      projectLocalCodexHomeForCleanup,
+      runtimeCodexHomeForCleanup: runtimeCodexHome,
+    };
+  }
+
+  return {
+    codexHomeOverride: resolveCodexHomeForLaunch(cwd, env),
+    projectLocalCodexHomeForCleanup,
+  };
+}
+
+async function cleanupRuntimeCodexHome(runtimeCodexHomeForCleanup?: string): Promise<void> {
+  if (!runtimeCodexHomeForCleanup) return;
+  await rm(runtimeCodexHomeForCleanup, { recursive: true, force: true });
 }
 
 function execTmuxFileSync(
@@ -519,8 +709,21 @@ function tmuxFailureMessage(error: unknown): string {
   return detail.replace(/\s+/g, " ");
 }
 
+function isUnsupportedTmuxExtendedKeysFailure(error: unknown): boolean {
+  const message = tmuxFailureMessage(error).toLowerCase();
+  return (
+    message.includes("extended-keys") &&
+    /(?:invalid|unknown|unsupported) (?:option|flag|argument)|no such option|unknown option/.test(
+      message,
+    )
+  );
+}
+
 function isBenignMissingTmuxServerMessage(message: string): boolean {
-  return /no server running/i.test(message);
+  return (
+    /no server running/i.test(message) ||
+    /error connecting to .*\(No such file or directory\)/i.test(message)
+  );
 }
 
 export interface TmuxLaunchHealth {
@@ -818,7 +1021,11 @@ export async function main(args: string[]): Promise<void> {
         await exploreCommand(args.slice(1));
         break;
       case "exec":
-        await execWithOverlay(launchArgs);
+        if (launchArgs[0] === "inject") {
+          await execInjectCommand(launchArgs);
+        } else {
+          await execWithOverlay(launchArgs);
+        }
         break;
       case "sparkshell":
         await sparkshellCommand(args.slice(1));
@@ -1010,17 +1217,17 @@ export async function launchWithHud(args: string[]): Promise<void> {
     parsedWorktree.remainingArgs,
     process.env,
   );
-  const explicitLaunchPolicy = resolveLeaderLaunchPolicyOverride(
+  const explicitLaunchPolicy = resolveEffectiveLeaderLaunchPolicyOverride(
     notifyTempResult.passthroughArgs,
+    process.env,
   );
-  const codexHomeOverride = resolveCodexHomeForLaunch(launchCwd, process.env);
-  const projectLocalCodexHomeForCleanup = resolveProjectLocalCodexHomeForLaunch(launchCwd, process.env);
+  const persistentCodexHomeForLaunch = resolveCodexHomeForLaunch(launchCwd, process.env);
   const { launchPolicy, effectiveExplicitLaunchPolicy } =
     resolveTmuxAwareLaunchPolicy(explicitLaunchPolicy, isNativeWindows());
   const enableNotifyFallbackAuthority = launchPolicy === "direct";
   const workerSparkModel = resolveWorkerSparkModel(
     notifyTempResult.passthroughArgs,
-    codexHomeOverride,
+    persistentCodexHomeForLaunch,
   );
   const normalizedArgs = normalizeCodexLaunchArgs(
     notifyTempResult.passthroughArgs,
@@ -1052,7 +1259,6 @@ export async function launchWithHud(args: string[]): Promise<void> {
     }
   }
   const sessionId = `omx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
   try {
     await maybeCheckAndPromptUpdate(cwd);
   } catch (err) {
@@ -1083,6 +1289,10 @@ export async function launchWithHud(args: string[]): Promise<void> {
     // Non-fatal: repair failure must not block launch
   }
 
+  const preparedCodexHome = await prepareCodexHomeForLaunch(launchCwd, sessionId, process.env);
+  const codexHomeOverride = preparedCodexHome.codexHomeOverride;
+  const projectLocalCodexHomeForCleanup = preparedCodexHome.projectLocalCodexHomeForCleanup;
+
   // ── Phase 1: preLaunch ──────────────────────────────────────────────────
   try {
     await preLaunch(cwd, sessionId, notifyTempResult.contract, codexHomeOverride, enableNotifyFallbackAuthority, worktreeDirty);
@@ -1094,11 +1304,12 @@ export async function launchWithHud(args: string[]): Promise<void> {
   }
 
   // ── Phase 2: run ────────────────────────────────────────────────────────
+  let postLaunchHandledExternally = false;
   try {
     const notifyTempContractRaw = notifyTempResult.contract.active
       ? serializeNotifyTempContract(notifyTempResult.contract)
       : null;
-    runCodex(
+    const launchResult = runCodex(
       cwd,
       normalizedArgs,
       sessionId,
@@ -1106,10 +1317,16 @@ export async function launchWithHud(args: string[]): Promise<void> {
       codexHomeOverride,
       notifyTempContractRaw,
       effectiveExplicitLaunchPolicy,
+      projectLocalCodexHomeForCleanup,
+      preparedCodexHome.runtimeCodexHomeForCleanup,
     );
+    postLaunchHandledExternally = launchResult.postLaunchHandledExternally;
   } finally {
     // ── Phase 3: postLaunch ─────────────────────────────────────────────
-    await postLaunch(cwd, sessionId, codexHomeOverride, enableNotifyFallbackAuthority, projectLocalCodexHomeForCleanup);
+    if (!postLaunchHandledExternally) {
+      await postLaunch(cwd, sessionId, codexHomeOverride, enableNotifyFallbackAuthority, projectLocalCodexHomeForCleanup);
+      await cleanupRuntimeCodexHome(preparedCodexHome.runtimeCodexHomeForCleanup).catch(logCliOperationFailure);
+    }
   }
 }
 
@@ -1120,8 +1337,6 @@ export async function execWithOverlay(args: string[]): Promise<void> {
     parsedWorktree.remainingArgs,
     process.env,
   );
-  const codexHomeOverride = resolveCodexHomeForLaunch(launchCwd, process.env);
-  const projectLocalCodexHomeForCleanup = resolveProjectLocalCodexHomeForLaunch(launchCwd, process.env);
   const normalizedArgs = normalizeCodexLaunchArgs(
     notifyTempResult.passthroughArgs,
   );
@@ -1179,6 +1394,10 @@ export async function execWithOverlay(args: string[]): Promise<void> {
     // Non-fatal
   }
 
+  const preparedCodexHome = await prepareCodexHomeForLaunch(launchCwd, sessionId, process.env);
+  const codexHomeOverride = preparedCodexHome.codexHomeOverride;
+  const projectLocalCodexHomeForCleanup = preparedCodexHome.projectLocalCodexHomeForCleanup;
+
   try {
     await preLaunch(cwd, sessionId, notifyTempResult.contract, codexHomeOverride, true, worktreeDirty);
   } catch (err) {
@@ -1209,6 +1428,7 @@ export async function execWithOverlay(args: string[]): Promise<void> {
     runCodexBlocking(cwd, codexArgs, codexEnv);
   } finally {
     await postLaunch(cwd, sessionId, codexHomeOverride, true, projectLocalCodexHomeForCleanup);
+    await cleanupRuntimeCodexHome(preparedCodexHome.runtimeCodexHomeForCleanup).catch(logCliOperationFailure);
   }
 }
 
@@ -1375,6 +1595,34 @@ export function resolveNativeSessionName(
     }
   }
   return buildTmuxSessionName(cwd, sessionId);
+}
+
+function tagTmuxSessionWithInstance(sessionName: string, sessionId: string): void {
+  const target = sessionName.trim();
+  const instanceId = sessionId.trim();
+  if (!target || !instanceId) return;
+  execFileSync("tmux", ["set-option", "-t", target, OMX_INSTANCE_OPTION, instanceId], {
+    stdio: ["ignore", "ignore", "ignore"],
+    timeout: 2000,
+  });
+}
+
+function tagCurrentTmuxSessionWithInstance(sessionId: string): void {
+  if (!process.env.TMUX) return;
+  try {
+    const tmuxPaneTarget = process.env.TMUX_PANE;
+    const displayArgs = tmuxPaneTarget
+      ? ["display-message", "-p", "-t", tmuxPaneTarget, "#S"]
+      : ["display-message", "-p", "#S"];
+    const sessionName = execFileSync("tmux", displayArgs, {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 2000,
+    }).trim();
+    if (sessionName) tagTmuxSessionWithInstance(sessionName, sessionId);
+  } catch {
+    // Best effort only: launch should not fail just because tmux tagging failed.
+  }
 }
 
 function buildNativeHookBaseContext(
@@ -1841,7 +2089,14 @@ function buildDetachedSessionLeaderCommand(
   cwd: string,
   sessionName: string,
   codexCmd: string,
+  sessionId?: string,
+  codexHomeOverride?: string,
+  projectLocalCodexHomeForCleanup?: string,
+  runtimeCodexHomeForCleanup?: string,
 ): string {
+  const detachedPostLaunchHelper = sessionId
+    ? `${buildDetachedSessionPostLaunchHelperCommand(cwd, sessionId, codexHomeOverride, projectLocalCodexHomeForCleanup, runtimeCodexHomeForCleanup)} >/dev/null 2>&1 || true;`
+    : "";
   const wrapped = [
     buildTmuxExtendedKeysAcquireShellSnippet(cwd),
     'exec 3<&0;',
@@ -1855,6 +2110,7 @@ function buildDetachedSessionLeaderCommand(
     "fi;",
     'exec 3<&- 2>/dev/null || true;',
     buildTmuxExtendedKeysReleaseShellSnippet(cwd),
+    detachedPostLaunchHelper,
     'if [ "$status" -lt 128 ]; then',
     `tmux kill-session -t "${escapeShellDoubleQuotedValue(sessionName)}" >/dev/null 2>&1 || true;`,
     "fi;",
@@ -1866,6 +2122,37 @@ function buildDetachedSessionLeaderCommand(
     'wait "$omx_codex_pid";',
   ].join(" ");
   return `/bin/sh -c ${quoteShellArg(wrapped)}`;
+}
+
+function buildDetachedSessionPostLaunchHelperCommand(
+  cwd: string,
+  sessionId: string,
+  codexHomeOverride?: string,
+  projectLocalCodexHomeForCleanup?: string,
+  runtimeCodexHomeForCleanup?: string,
+): string {
+  const cwdLiteral = JSON.stringify(cwd);
+  const sessionIdLiteral = JSON.stringify(sessionId);
+  const codexHomeLiteral =
+    typeof codexHomeOverride === "string" && codexHomeOverride.length > 0
+      ? JSON.stringify(codexHomeOverride)
+      : "undefined";
+  const projectLocalCleanupLiteral =
+    typeof projectLocalCodexHomeForCleanup === "string" &&
+    projectLocalCodexHomeForCleanup.length > 0
+      ? JSON.stringify(projectLocalCodexHomeForCleanup)
+      : "undefined";
+  const runtimeCodexHomeCleanupLiteral =
+    typeof runtimeCodexHomeForCleanup === "string" &&
+    runtimeCodexHomeForCleanup.length > 0
+      ? JSON.stringify(runtimeCodexHomeForCleanup)
+      : "undefined";
+  const moduleUrlLiteral = JSON.stringify(import.meta.url);
+  const script = [
+    `const mod = await import(${moduleUrlLiteral});`,
+    `await mod.runDetachedSessionPostLaunch(${cwdLiteral}, ${sessionIdLiteral}, ${codexHomeLiteral}, ${projectLocalCleanupLiteral}, ${runtimeCodexHomeCleanupLiteral});`,
+  ].join(" ");
+  return `${quoteShellArg(process.execPath)} --input-type=module -e ${quoteShellArg(script)}`;
 }
 
 type TmuxExecSync = (file: string, args: readonly string[]) => string;
@@ -1926,7 +2213,9 @@ export function acquireTmuxExtendedKeysLease(
     });
     return `${socketPath}\t${leaseId}`;
   } catch (err) {
-    logCliOperationFailure(err);
+    if (!isUnsupportedTmuxExtendedKeysFailure(err)) {
+      logCliOperationFailure(err);
+    }
     return null;
   }
 }
@@ -1979,7 +2268,9 @@ export function releaseTmuxExtendedKeysLease(
       rmSync(leasePath, { force: true });
     });
   } catch (err) {
-    logCliOperationFailure(err);
+    if (!isUnsupportedTmuxExtendedKeysFailure(err)) {
+      logCliOperationFailure(err);
+    }
   }
 }
 
@@ -2031,10 +2322,20 @@ export function buildDetachedSessionBootstrapSteps(
   notifyTempContractRaw?: string | null,
   nativeWindows = false,
   sessionId?: string,
+  projectLocalCodexHomeForCleanup?: string,
+  runtimeCodexHomeForCleanup?: string,
 ): DetachedSessionTmuxStep[] {
   const detachedLeaderCmd = nativeWindows
     ? "powershell.exe"
-    : buildDetachedSessionLeaderCommand(cwd, sessionName, codexCmd);
+    : buildDetachedSessionLeaderCommand(
+        cwd,
+        sessionName,
+        codexCmd,
+        sessionId,
+        codexHomeOverride,
+        projectLocalCodexHomeForCleanup,
+        runtimeCodexHomeForCleanup,
+      );
   const newSessionArgs: string[] = [
     "new-session",
     "-d",
@@ -2072,6 +2373,14 @@ export function buildDetachedSessionBootstrapSteps(
   ];
   return [
     { name: "new-session", args: newSessionArgs },
+    ...(sessionId
+      ? [
+          {
+            name: "tag-session",
+            args: ["set-option", "-t", sessionName, OMX_INSTANCE_OPTION, sessionId],
+          },
+        ]
+      : []),
     { name: "split-and-capture-hud-pane", args: splitCaptureArgs },
   ];
 }
@@ -2552,6 +2861,7 @@ ${launchAppendix}${dirtyWorktreeGuidance}`
   // 3. Write session state
   await resetSessionMetrics(cwd, sessionId);
   await writeSessionStart(cwd, sessionId);
+  tagCurrentTmuxSessionWithInstance(sessionId);
 
   // 4. Start notify fallback watcher (best effort)
   try {
@@ -2629,7 +2939,9 @@ function runCodex(
   codexHomeOverride?: string,
   notifyTempContractRaw?: string | null,
   explicitLaunchPolicy?: CodexLaunchPolicy,
-): void {
+  projectLocalCodexHomeForCleanup?: string,
+  runtimeCodexHomeForCleanup?: string,
+): { postLaunchHandledExternally: boolean } {
   const launchArgs = injectModelInstructionsBypassArgs(
     cwd,
     args,
@@ -2669,7 +2981,7 @@ function runCodex(
 
   if (isCodexVersionRequest(launchArgs)) {
     runCodexBlocking(cwd, launchArgs, codexEnvWithNotify);
-    return;
+    return { postLaunchHandledExternally: false };
   }
 
   if (launchPolicy === "inside-tmux") {
@@ -2730,10 +3042,12 @@ function runCodex(
         killTmuxPane(paneId);
       }
     }
+    return { postLaunchHandledExternally: false };
   } else if (launchPolicy === "direct") {
     // Detached HUD sessions require tmux. Skip the bootstrap entirely when the
     // binary is unavailable so direct launches do not emit noisy ENOENT logs.
     runCodexBlocking(cwd, launchArgs, codexEnvWithNotify);
+    return { postLaunchHandledExternally: false };
   } else {
     // Not in tmux: create a new tmux session with codex + HUD pane
     const codexCmd = buildTmuxPaneCommand("codex", launchArgs);
@@ -2760,6 +3074,8 @@ function runCodex(
         notifyTempContractRaw,
         nativeWindows,
         sessionId,
+        projectLocalCodexHomeForCleanup,
+        runtimeCodexHomeForCleanup,
       );
       for (const step of bootstrapSteps) {
         const output = execTmuxFileSync(step.args, {
@@ -2846,6 +3162,7 @@ function runCodex(
           }
         }
       }
+      return { postLaunchHandledExternally: !nativeWindows };
     } catch (err) {
       logCliOperationFailure(err);
       if (createdDetachedSession) {
@@ -2866,6 +3183,7 @@ function runCodex(
       }
       // tmux not available or failed, just run codex directly
       runCodexBlocking(cwd, launchArgs, codexEnvWithNotify);
+      return { postLaunchHandledExternally: false };
     }
   }
 }
@@ -3155,6 +3473,23 @@ async function postLaunch(
     logCliOperationFailure(err);
     // Non-fatal
   }
+}
+
+export async function runDetachedSessionPostLaunch(
+  cwd: string,
+  sessionId: string,
+  codexHomeOverride?: string,
+  projectLocalCodexHomeForCleanup?: string,
+  runtimeCodexHomeForCleanup?: string,
+): Promise<void> {
+  await postLaunch(
+    cwd,
+    sessionId,
+    codexHomeOverride,
+    false,
+    projectLocalCodexHomeForCleanup,
+  );
+  await cleanupRuntimeCodexHome(runtimeCodexHomeForCleanup).catch(logCliOperationFailure);
 }
 
 async function emitNativeHookEvent(

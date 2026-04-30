@@ -34,6 +34,9 @@ import { resolveOmxCliEntryPath } from '../utils/paths.js';
 const execFileAsync = promisify(execFile);
 import { HUD_RESIZE_RECONCILE_DELAY_SECONDS, HUD_TMUX_TEAM_HEIGHT_LINES } from '../hud/constants.js';
 
+const OMX_INSTANCE_OPTION = '@omx_instance_id';
+const OMX_PANE_INSTANCE_OPTION = '@omx_pane_instance_id';
+
 export interface TeamSession {
   name: string; // tmux target in "session:window" form
   workerCount: number;
@@ -152,6 +155,16 @@ function sanitizeTmuxStyleOption(sessionTarget: string, optionName: string): boo
 
   const result = runTmux(['set-option', '-t', sessionTarget, optionName, sanitized]);
   return result.ok;
+}
+
+function tagPaneInstance(paneTarget: string, instanceId: string): void {
+  const target = paneTarget.trim();
+  const sanitized = instanceId.trim();
+  if (!target || !sanitized) return;
+  const result = runTmux(['set-option', '-p', '-t', target, OMX_PANE_INSTANCE_OPTION, sanitized]);
+  if (!result.ok) {
+    throw new Error(`failed to tag tmux pane ${target}: ${result.stderr}`);
+  }
 }
 
 export function mitigateCopyModeUnderlineArtifacts(sessionTarget: string): boolean {
@@ -1061,8 +1074,16 @@ export function createTeamSession(
       throw new Error(`failed to parse current tmux target: ${context.stdout}`);
     }
     const teamTarget = `${sessionName}:${windowIndex}`;
+    const instanceId = (process.env.OMX_SESSION_ID || '').trim();
+    if (instanceId) {
+      const tagResult = runTmux(['set-option', '-t', sessionName, OMX_INSTANCE_OPTION, instanceId]);
+      if (!tagResult.ok) {
+        throw new Error(`failed to tag tmux session ${sessionName}: ${tagResult.stderr}`);
+      }
+    }
     const panes = listPanes(teamTarget);
     const leaderPaneId = chooseTeamLeaderPaneId(panes, detectedLeaderPaneId);
+    tagPaneInstance(leaderPaneId, instanceId);
     const initialHudPaneIds = findHudPaneIds(teamTarget, leaderPaneId);
     // Team mode prioritizes leader + worker visibility. Remove HUD panes in this window
     // to keep a clean "leader left / workers right" layout.
@@ -1115,6 +1136,7 @@ export function createTeamSession(
       if (isNativeWindows() && !waitForPaneToRemainPresent(teamTarget, paneId)) {
         throw new Error(`worker pane ${i} did not remain present after tmux split-window returned ${paneId}`);
       }
+      tagPaneInstance(paneId, instanceId);
       workerPaneIds.push(paneId);
       if (i === 1) rightStackRootPaneId = paneId;
     }
@@ -1154,6 +1176,7 @@ export function createTeamSession(
           if (isNativeWindows() && !waitForPaneToRemainPresent(teamTarget, id)) {
             throw new Error(`HUD pane did not remain present after tmux split-window returned ${id}`);
           }
+          tagPaneInstance(id, instanceId);
           hudPaneId = id;
 
           if (isNativeWindows()) {
@@ -1342,6 +1365,33 @@ function paneHasClaudeBypassPermissionsPrompt(captured: string): boolean {
   return hasWarning && hasChoices;
 }
 
+
+export type StartupDirectTriggerSafety =
+  | { safe: true; reason: 'ready_prompt' | 'codex_viewport' }
+  | { safe: false; reason: 'tmux_unavailable' | 'capture_failed' | 'trust_prompt' | 'claude_bypass_prompt' | 'bootstrapping' | 'not_agent_viewport' };
+
+export function evaluateStartupDirectTriggerSafetyCapture(captured: string, workerCli?: TeamWorkerCli): StartupDirectTriggerSafety {
+  if (paneHasTrustPrompt(captured)) return { safe: false, reason: 'trust_prompt' };
+  if (paneHasClaudeBypassPermissionsPrompt(captured)) return { safe: false, reason: 'claude_bypass_prompt' };
+  if (paneLooksReady(captured)) return { safe: true, reason: 'ready_prompt' };
+  if (paneIsBootstrapping(captured)) return { safe: false, reason: 'bootstrapping' };
+  if (workerCli === 'codex' && sharedPaneShowsCodexViewport(captured)) return { safe: true, reason: 'codex_viewport' };
+  return { safe: false, reason: 'not_agent_viewport' };
+}
+
+export async function evaluateStartupDirectTriggerSafety(
+  sessionName: string,
+  workerIndex: number,
+  workerPaneId?: string,
+  workerCli?: TeamWorkerCli,
+): Promise<StartupDirectTriggerSafety> {
+  if (!isTmuxAvailable()) return { safe: false, reason: 'tmux_unavailable' };
+  const target = paneTarget(sessionName, workerIndex, workerPaneId);
+  const result = await runTmuxAsync(sharedBuildVisibleCapturePaneArgv(target));
+  if (!result.ok) return { safe: false, reason: 'capture_failed' };
+  return evaluateStartupDirectTriggerSafetyCapture(result.stdout, workerCli);
+}
+
 function acceptClaudeBypassPermissionsPrompt(target: string): void {
   runTmux(['send-keys', '-t', target, '-l', '--', '2']);
   sleepFractionalSeconds(0.12);
@@ -1356,6 +1406,45 @@ function dismissClaudeBypassPermissionsPromptIfPresent(target: string, captured:
 }
 
 export const paneHasActiveTask = sharedPaneHasActiveTask;
+
+export type WorkerStartupInjectSafety =
+  | 'safe'
+  | 'trust_prompt'
+  | 'claude_bypass_prompt'
+  | 'bootstrapping'
+  | 'active_task'
+  | 'not_ready';
+
+export function classifyWorkerStartupInjectSafety(captured: string): WorkerStartupInjectSafety {
+  if (paneHasTrustPrompt(captured)) return 'trust_prompt';
+  if (paneHasClaudeBypassPermissionsPrompt(captured)) return 'claude_bypass_prompt';
+  if (paneIsBootstrapping(captured)) return 'bootstrapping';
+  if (paneHasActiveTask(captured)) return 'active_task';
+  if (!paneLooksReady(captured)) return 'not_ready';
+  return 'safe';
+}
+
+export async function checkWorkerStartupInjectSafety(
+  sessionName: string,
+  workerIndex: number,
+  workerPaneId?: string,
+): Promise<{ safe: true; reason: 'safe' } | { safe: false; reason: Exclude<WorkerStartupInjectSafety, 'safe'> }> {
+  const target = paneTarget(sessionName, workerIndex, workerPaneId);
+  const visibleCapture = await captureVisiblePaneAsync(target);
+  const visibleSafety = classifyWorkerStartupInjectSafety(visibleCapture);
+  if (visibleSafety === 'safe') return { safe: true, reason: 'safe' };
+  if (visibleSafety !== 'not_ready') return { safe: false, reason: visibleSafety };
+
+  if (!sharedPaneShowsCodexViewport(visibleCapture)) {
+    return { safe: false, reason: visibleSafety };
+  }
+
+  const scrollbackCapture = await capturePaneAsync(target);
+  const scrollbackSafety = classifyWorkerStartupInjectSafety(scrollbackCapture);
+  return scrollbackSafety === 'safe'
+    ? { safe: true, reason: 'safe' }
+    : { safe: false, reason: scrollbackSafety };
+}
 
 function resolveSendStrategyFromEnv(): 'auto' | 'queue' | 'interrupt' {
   const raw = String(process.env.OMX_TEAM_SEND_STRATEGY || '')

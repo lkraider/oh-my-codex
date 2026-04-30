@@ -239,6 +239,11 @@ function buildRalphApprovedExecutionLines(approvedHint: ApprovedExecutionLaunchH
     lines.push('- context pack: not declared in the approved plan; using the pre-context-pack plan-only handoff baseline.');
     lines.push('- Plan-only fallback: start from the approved plan, matching test specs, and any deep-interview artifacts as repair inputs, then create or refresh the canonical context pack and sync it before broadening context.');
   }
+  if (approvedHint.repositoryContextSummary) {
+    lines.push(`- approved repository context summary: ${approvedHint.repositoryContextSummary.sourcePath}${approvedHint.repositoryContextSummary.truncated ? ' (bounded/truncated)' : ''}`);
+    lines.push('Approved repository context summary (bounded, inspectable):');
+    lines.push(approvedHint.repositoryContextSummary.content);
+  }
   return lines;
 }
 

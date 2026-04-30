@@ -919,6 +919,30 @@ describe('parseTeamStartArgs', () => {
     }
   });
 
+  it('attaches approved repository context summary only for matching team launches', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-team-context-approved-'));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(wd);
+      await mkdir(join(wd, '.omx', 'plans'), { recursive: true });
+      await writeFile(
+        join(wd, '.omx', 'plans', 'prd-issue-2039.md'),
+        '# Approved plan\n\nLaunch via omx team 3:executor "Execute approved issue 2039 plan"\n',
+      );
+      await writeFile(join(wd, '.omx', 'plans', 'test-spec-issue-2039.md'), '# Test spec\n');
+      await writeFile(join(wd, '.omx', 'plans', 'repo-context-issue-2039.md'), 'Key boundary: latest approved handoff only.\n');
+
+      const approved = parseTeamStartArgs(['3:executor', 'Execute', 'approved', 'issue', '2039', 'plan']);
+      assert.equal(approved.parsed.approvedRepositoryContextSummary?.content, 'Key boundary: latest approved handoff only.');
+
+      const unrelated = parseTeamStartArgs(['3:executor', 'fix', 'unrelated', 'bug']);
+      assert.equal(unrelated.parsed.approvedRepositoryContextSummary, undefined);
+    } finally {
+      process.chdir(previousCwd);
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
   it('does not materialize approved excerpts before task selection for unrelated team launches', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-team-unrelated-approved-context-'));
     const binDir = join(wd, 'bin');
@@ -1554,7 +1578,6 @@ process.on('SIGTERM', () => process.exit(0));
       await rm(wd, { recursive: true, force: true });
     }
   });
-
   it('preserves explicit team staffing overrides while reusing the approved plan task', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-team-followup-override-'));
     const previousCwd = process.cwd();
@@ -2609,7 +2632,7 @@ describe('teamCommand api', () => {
 
 
 describe('teamCommand status', () => {
-  it('prints pane ids and sparkshell hint when tmux panes are recorded', async () => {
+  it('prints pane ids and raw inspect hints when tmux panes are recorded', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-team-status-panes-'));
     const previousCwd = process.cwd();
     const logs: string[] = [];
@@ -2742,11 +2765,21 @@ describe('teamCommand status', () => {
       const output = logs.join('\n');
       assert.match(output, /panes: leader=%10 hud=%11/);
       assert.match(output, /worker_panes: worker-1=%21 worker-2=%22/);
-      assert.match(output, /sparkshell_hint: omx sparkshell --tmux-pane <pane-id> --tail-lines 400/);
-      assert.match(output, /inspect_leader: omx sparkshell --tmux-pane %10 --tail-lines 400/);
-      assert.match(output, /inspect_hud: omx sparkshell --tmux-pane %11 --tail-lines 400/);
-      assert.match(output, /inspect_worker-1: omx sparkshell --tmux-pane %21 --tail-lines 400/);
-      assert.match(output, /inspect_worker-2: omx sparkshell --tmux-pane %22 --tail-lines 400/);
+      assert.match(output, /inspect_hint: raw tmux capture commands are quota-free/);
+      assert.match(output, /inspect_leader: tmux capture-pane -p -t %10 -S -400/);
+      assert.match(output, /inspect_hud: tmux capture-pane -p -t %11 -S -400/);
+      assert.match(output, /inspect_worker-1: tmux capture-pane -p -t %21 -S -400/);
+      assert.match(output, /inspect_worker-2: tmux capture-pane -p -t %22 -S -400/);
+      assert.match(output, /inspect_summary: .*command=tmux capture-pane -p -t %21 -S -400/);
+      assert.doesNotMatch(output
+        .split('\n')
+        .filter((line) => !line.includes('--model-inspect'))
+        .join('\n'), /omx sparkshell/);
+
+      logs.length = 0;
+      await withoutTeamTestWorkerEnv(() => teamCommand(['status', 'pane-team', '--model-inspect']));
+      const modelInspectOutput = logs.join('\n');
+      assert.match(modelInspectOutput, /inspect_summary: .*command=omx sparkshell --tmux-pane %21 --tail-lines 400/);
     } finally {
       console.log = originalLog;
       process.chdir(previousCwd);
@@ -3274,7 +3307,7 @@ describe('teamCommand status', () => {
     }
   });
 
-  it('supports custom tail lines for generated sparkshell commands', async () => {
+  it('supports custom tail lines for generated raw inspect commands', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-team-status-tail-lines-'));
     const previousCwd = process.cwd();
     const logs: string[] = [];
@@ -3302,6 +3335,10 @@ describe('teamCommand status', () => {
 
       console.log = (...args: unknown[]) => logs.push(args.map(String).join(' '));
       await withoutTeamTestWorkerEnv(() => teamCommand(['status', 'pane-tail-team', '--tail-lines', '600']));
+      assert.match(logs.join('\n'), /inspect_worker-1: tmux capture-pane -p -t %51 -S -600/);
+
+      logs.length = 0;
+      await withoutTeamTestWorkerEnv(() => teamCommand(['status', 'pane-tail-team', '--model-inspect', '--tail-lines', '600']));
       assert.match(logs.join('\n'), /inspect_worker-1: omx sparkshell --tmux-pane %51 --tail-lines 600/);
 
       logs.length = 0;

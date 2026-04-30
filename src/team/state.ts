@@ -132,6 +132,13 @@ export interface WorkerStatus {
 export type TeamTaskDelegationMode = 'none' | 'optional' | 'auto' | 'required';
 export type TeamTaskChildModelPolicy = 'standard' | 'fast' | 'inherit' | 'frontier';
 
+export interface TeamTaskDelegationComplianceEvidence {
+  status: 'spawned' | 'skipped';
+  source: 'terminal_result';
+  detail: string;
+  recorded_at: string;
+}
+
 export interface TeamTaskDelegationPlan {
   mode: TeamTaskDelegationMode;
   max_parallel_subtasks?: number;
@@ -165,6 +172,7 @@ export interface TeamTask {
   created_at: string;
   completed_at?: string;
   delegation?: TeamTaskDelegationPlan;
+  delegation_compliance?: TeamTaskDelegationComplianceEvidence;
 }
 
 export interface TeamTaskClaim {
@@ -345,7 +353,7 @@ export type ClaimTaskResult =
 
 export type TransitionTaskResult =
   | { ok: true; task: TeamTaskV2 }
-  | { ok: false; error: 'claim_conflict' | 'invalid_transition' | 'task_not_found' | 'already_terminal' | 'lease_expired' };
+  | { ok: false; error: 'claim_conflict' | 'invalid_transition' | 'task_not_found' | 'already_terminal' | 'lease_expired' | 'missing_delegation_compliance_evidence' };
 
 export type ReleaseTaskClaimResult =
   | { ok: true; task: TeamTaskV2 }

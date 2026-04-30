@@ -211,10 +211,6 @@ export async function executeStateOperation(
   }
 
   try {
-    const stateScope = await resolveStateScope(cwd, explicitSessionId);
-    const effectiveSessionId = stateScope.sessionId;
-    await initializeStateEnvironment(cwd, effectiveSessionId);
-
     switch (name) {
       case 'state_read': {
         const mode = validateStrictReadableMode(rawArgs.mode);
@@ -228,6 +224,10 @@ export async function executeStateOperation(
       }
 
       case 'state_write': {
+        const stateScope = await resolveStateScope(cwd, explicitSessionId);
+        const effectiveSessionId = stateScope.sessionId;
+        await initializeStateEnvironment(cwd, effectiveSessionId);
+
         const mode = validateStateModeSegment(rawArgs.mode);
         const path = getStatePath(mode, cwd, effectiveSessionId);
         const {
@@ -368,6 +368,10 @@ export async function executeStateOperation(
       }
 
       case 'state_clear': {
+        const stateScope = await resolveStateScope(cwd, explicitSessionId);
+        const effectiveSessionId = stateScope.sessionId;
+        await initializeStateEnvironment(cwd, effectiveSessionId);
+
         const mode = validateStateModeSegment(rawArgs.mode);
         const allSessions = rawArgs.all_sessions === true;
 
