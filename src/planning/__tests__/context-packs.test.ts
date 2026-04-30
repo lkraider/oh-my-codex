@@ -257,6 +257,21 @@ describe('context-packs', () => {
     assert.equal(basis, null);
   });
 
+  it('builds basis from a legacy case-variant PRD when no exact basename exists', async () => {
+    await mkdir(join(tempDir, '.omx', 'plans'), { recursive: true });
+    await writeFile(join(tempDir, '.omx', 'plans', 'PRD-issue-case-variant.md'), '# PRD\n');
+    await writeFile(join(tempDir, '.omx', 'plans', 'test-spec-issue-case-variant.md'), '# Test Spec\n');
+
+    const basis = buildContextPackBasis(tempDir, 'issue-case-variant');
+
+    assert.ok(basis);
+    assert.equal(basis?.prd.path, '.omx/plans/PRD-issue-case-variant.md');
+    assert.deepEqual(
+      basis?.testSpecs.map((entry) => entry.path),
+      ['.omx/plans/test-spec-issue-case-variant.md'],
+    );
+  });
+
   it('preserves mixed-case approved artifact names in fresh basis validation', async () => {
     await mkdir(join(tempDir, '.omx', 'plans'), { recursive: true });
     await writeFile(join(tempDir, '.omx', 'plans', 'prd-Issue-ABC.md'), '# PRD\n');

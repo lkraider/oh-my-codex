@@ -4,7 +4,13 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
-import { readApprovedExecutionLaunchHint, resolveContextPackHandoffState } from '../../planning/artifacts.js';
+import { readApprovedExecutionLaunchHint } from '../../planning/artifacts.js';
+import {
+  isApprovedExecutionContextReadyStatus,
+  isApprovedExecutionFollowupReadyStatus,
+  resolveContextPackHandoffState,
+  selectBaselinePrdPathForSlug,
+} from '../../planning/approved-plan-lifecycle.js';
 import {
   contextPackExcerptPath,
   readContextPackDocument,
@@ -264,6 +270,17 @@ function latestPlanningSelectionModel(
         .sort(comparePlanningArtifactPathModel)
       : [],
   };
+}
+
+function baselinePrdForSlugModel(prds: readonly string[], slug: string): string | null {
+  const matchingPrds = prds.filter((path) => artifactName(path)?.kind === 'prd' && artifactName(path)?.slug === slug);
+  const timestampedPrds = matchingPrds.filter((path) => artifactName(path)?.timestamp);
+  if (timestampedPrds.length > 0) {
+    return [...timestampedPrds].sort(comparePlanningArtifactPathModel).at(-1) ?? null;
+  }
+
+  return matchingPrds.find((path) => basename(path) === `prd-${slug}.md`)
+    ?? ([...matchingPrds].sort(comparePlanningArtifactPathModel).at(-1) ?? null);
 }
 
 function projectLastHintModel<T>(hints: readonly T[]): T | null {
@@ -886,6 +903,9 @@ describe('launch-lifecycle-state-machine reference', () => {
     assert.match(MODEL_DOC, /plan-only  -> pre-context-pack compatibility path only; no approved binding\/context projection/);
     assert.match(MODEL_DOC, /Pre-context-pack compatibility means an approved PRD\/test-spec pair with no real/);
     assert.match(MODEL_DOC, /canonical_path is the source of slug and sibling-artifact correlation/);
+    assert.match(MODEL_DOC, /BaselinePRD\(cwd, s\) ::=/);
+    assert.match(MODEL_DOC, /exact legacy \.omx\/plans\/prd-<s>\.md when present/);
+    assert.match(MODEL_DOC, /discovery is case-insensitive by basename contract/);
     assert.match(MODEL_DOC, /launch-hint-like command lines are ignored/);
     assert.match(MODEL_DOC, /LaunchBindingWriteRoot\(cwd\) := resolveCanonicalTeamStateRoot\(cwd\)/);
     assert.match(MODEL_DOC, /Recovery-time visibility root/);
@@ -1000,6 +1020,44 @@ describe('launch-lifecycle-state-machine reference', () => {
       },
     );
 
+    const slugSelectorCases = [
+      {
+        prds: [
+          '/repo/.omx/plans/prd-alpha.md',
+          '/repo/.omx/plans/PRD-alpha.md',
+        ],
+        slug: 'alpha',
+      },
+      {
+        prds: [
+          '/repo/.omx/plans/PRD-alpha.md',
+          '/repo/.omx/plans/prd-20260427T153000Z-alpha.md',
+          '/repo/.omx/plans/prd-20260427T153100Z-alpha.md',
+        ],
+        slug: 'alpha',
+      },
+      {
+        prds: [
+          '/repo/.omx/plans/PRD-alpha.md',
+          '/repo/.omx/plans/prd-alpha.MD',
+        ],
+        slug: 'alpha',
+      },
+      {
+        prds: [
+          '/repo/.omx/plans/prd-beta.md',
+        ],
+        slug: 'alpha',
+      },
+    ] as const;
+
+    for (const { prds, slug } of slugSelectorCases) {
+      assert.equal(
+        selectBaselinePrdPathForSlug(prds, slug),
+        baselinePrdForSlugModel(prds, slug),
+      );
+    }
+
     for (let hintCount = 0; hintCount <= hints.length; hintCount += 1) {
       const selected = projectLastHintModel(hints.slice(0, hintCount));
       assert.equal(selected, hintCount === 0 ? null : hints[hintCount - 1]);
@@ -1094,6 +1152,23 @@ describe('launch-lifecycle-state-machine reference', () => {
       }),
       'plan-only',
     );
+  });
+
+  it('keeps unified lifecycle readiness helpers aligned with the formal execution definitions', () => {
+    const states: HandoffState[] = ['missing-baseline', 'plan-only', 'ready', 'incomplete', 'invalid'];
+
+    for (const state of states) {
+      assert.equal(
+        isApprovedExecutionFollowupReadyStatus(state),
+        executionReusable(state),
+        `follow-up readiness drifted for ${state}`,
+      );
+      assert.equal(
+        isApprovedExecutionContextReadyStatus(state),
+        contextReady(state),
+        `context readiness drifted for ${state}`,
+      );
+    }
   });
 
   it('exhaustively model-checks context-pack diagnostic role projection', () => {

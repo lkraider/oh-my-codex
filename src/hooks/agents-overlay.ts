@@ -192,15 +192,18 @@ async function isRalphActive(
 
 async function readRalphPlanningArtifacts(
   cwd: string,
-): Promise<{ hasPrd: boolean; hasTestSpec: boolean; complete: boolean; blocker: string | null }> {
+): Promise<{ hasPrd: boolean; complete: boolean; blocker: string | null }> {
   const artifacts = readPlanningArtifacts(cwd);
   const selection = readLatestPlanningArtifacts(cwd);
   const hasPrd = artifacts.prdPaths.length > 0;
+  const hasAnyTestSpec = artifacts.testSpecPaths.length > 0;
   const hasMatchingTestSpec = selection.testSpecPaths.length > 0;
   const blocker = !hasPrd
-    ? "Missing: `prd-*.md`"
+    ? `Missing: ${hasAnyTestSpec ? "`prd-*.md`" : "`prd-*.md`, `test-spec-*.md`"}`
     : !hasMatchingTestSpec
-      ? "Missing: `test-spec-*.md` matching the latest approved PRD baseline"
+      ? selection.contextPackStatus === "missing-baseline" && selection.contextPackIssues.length > 0
+        ? `Missing baseline: ${selection.contextPackIssues.join(" | ")}`
+        : "Missing: `test-spec-*.md` matching the latest approved PRD baseline"
       : selection.contextPackStatus === "incomplete"
         ? `Context-pack blocker: ${(selection.contextPackIssues.length > 0 ? selection.contextPackIssues.join(" | ") : `missing required roles ${selection.missingRequiredContextPackRoles.join(", ")}`)}`
         : selection.contextPackStatus === "invalid"
@@ -208,7 +211,6 @@ async function readRalphPlanningArtifacts(
           : null;
   return {
     hasPrd,
-    hasTestSpec: hasMatchingTestSpec,
     complete: isPlanningComplete(artifacts),
     blocker,
   };
@@ -467,14 +469,9 @@ export async function generateOverlay(
 
   if (ralphActive) {
     const gateStatus = planningArtifacts.complete ? "UNLOCKED" : "BLOCKED";
-    const missing: string[] = [];
-    if (!planningArtifacts.hasPrd) missing.push("`prd-*.md`");
-    if (!planningArtifacts.hasTestSpec) missing.push("`test-spec-*.md`");
     const details =
-      missing.length > 0
-        ? `Missing: ${missing.join(", ")}`
-        : planningArtifacts.blocker
-          ? planningArtifacts.blocker
+      planningArtifacts.blocker
+        ? planningArtifacts.blocker
         : "Planning artifacts present: PRD + test spec";
 
     sections.push({

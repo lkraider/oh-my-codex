@@ -190,6 +190,32 @@ describe("adapt foundation", () => {
 		assert.match(envelope.planning.summary, /plan-only execution baseline remains available/i);
 	});
 
+	it("surfaces timestamped missing-baseline guidance in the planning summary", async () => {
+		const plansDir = join(tempDir, ".omx", "plans");
+		await mkdir(plansDir, { recursive: true });
+		await writeFile(join(plansDir, "prd-20260427T153100Z-issue-902.md"), "# PRD\n");
+		await writeFile(join(plansDir, "test-spec-issue-902.md"), "# Legacy Test Spec\n");
+		await writeFile(
+			join(plansDir, "testspec-20260427T153100Z-issue-902.md"),
+			"# Deprecated Timestamped Alias\n",
+		);
+
+		const envelope = buildAdaptEnvelope(
+			tempDir,
+			"openclaw",
+			new Date("2026-04-14T00:00:00.000Z"),
+		);
+		assert.equal(envelope.planning.contextPackStatus, "missing-baseline");
+		assert.match(
+			envelope.planning.summary,
+			/Approved timestamped plan requires test spec `test-spec-20260427T153100Z-issue-902\.md`\./,
+		);
+		assert.match(
+			envelope.planning.summary,
+			/Found non-matching test-spec files: `test-spec-issue-902\.md`, `testspec-20260427T153100Z-issue-902\.md`\./,
+		);
+	});
+
 	it("reports asymmetric capability ownership in the shared envelope", () => {
 		const envelope = buildAdaptEnvelope(
 			tempDir,

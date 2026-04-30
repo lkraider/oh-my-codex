@@ -4,11 +4,10 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, relative } from 'node:path';
 import {
-  comparePlanningArtifactPaths,
   parsePlanningArtifactFileName,
   planningArtifactSlug,
-  selectMatchingTestSpecsForPrd,
 } from './artifact-names.js';
+import { resolveApprovedPlanBaselineForSlug } from './approved-plan-lifecycle.js';
 import { advanceMarkdownFenceState, isIndentedMarkdownCodeLine, type MarkdownFenceState } from './markdown-structure.js';
 import { isCanonicalContextPackPath, normalizePlanningRepoRelativePath } from './path-utils.js';
 
@@ -583,114 +582,18 @@ function normalizeBasis(
   return { prd, testSpecs };
 }
 
-interface PlanningArtifactFileSelection {
-  prdFileName: string;
-  testSpecFileNames: string[];
-  requiredTimestampedFileName: string | null;
-  nonMatchingTestSpecFileNames: string[];
-}
-
-function resolvePlanningArtifactFileSelection(
-  planFileNames: readonly string[],
-  slug: string,
-): PlanningArtifactFileSelection | null {
-  const matchingPrdFileNames = planFileNames
-    .filter((fileName) => planningArtifactSlug(fileName, 'prd') === slug);
-  const timestampedPrdFileNames = matchingPrdFileNames
-    .filter((fileName) => parsePlanningArtifactFileName(fileName)?.timestamp);
-  const prdFileName = timestampedPrdFileNames.length > 0
-    ? timestampedPrdFileNames.sort(comparePlanningArtifactPaths).at(-1)
-    : matchingPrdFileNames.includes(`prd-${slug}.md`)
-      ? `prd-${slug}.md`
-      : matchingPrdFileNames.sort(comparePlanningArtifactPaths).at(-1);
-  if (!prdFileName) {
-    return null;
-  }
-
-  const testSpecSelection = selectMatchingTestSpecsForPrd(prdFileName, planFileNames);
-  const matchingTestSpecFileNames = testSpecSelection.paths;
-  const matchingTestSpecPaths = new Set(matchingTestSpecFileNames);
-  const nonMatchingTestSpecFileNames = planFileNames
-    .filter((fileName) => planningArtifactSlug(fileName, 'test-spec') === slug)
-    .sort(comparePlanningArtifactPaths)
-    .filter((fileName) => !matchingTestSpecPaths.has(fileName));
-
-  return {
-    prdFileName,
-    testSpecFileNames: matchingTestSpecFileNames,
-    requiredTimestampedFileName: testSpecSelection.requiredTimestampedFileName,
-    nonMatchingTestSpecFileNames,
-  };
-}
-
-function formatContextPackBasisFileNames(fileNames: readonly string[]): string {
-  return fileNames.map((fileName) => `\`${fileName}\``).join(', ');
-}
-
-function describeContextPackBasisResolutionIssuesForPlanFileNames(
-  planFileNames: readonly string[],
-  slug: string,
-): string[] {
-  const selection = resolvePlanningArtifactFileSelection(planFileNames, slug);
-  if (!selection || selection.testSpecFileNames.length > 0 || !selection.requiredTimestampedFileName) {
-    return [];
-  }
-
-  const issues = [`Approved timestamped plan requires test spec \`${selection.requiredTimestampedFileName}\`.`];
-  if (selection.nonMatchingTestSpecFileNames.length > 0) {
-    issues.push(`Found non-matching test-spec files: ${formatContextPackBasisFileNames(selection.nonMatchingTestSpecFileNames)}.`);
-  }
-  return issues;
-}
-
 export function describeContextPackBasisResolutionIssues(
   repoRoot: string,
   slug: string,
 ): string[] {
-  const plansDir = join(repoRoot, '.omx', 'plans');
-  if (!existsSync(plansDir)) {
-    return [];
-  }
-
-  try {
-    return describeContextPackBasisResolutionIssuesForPlanFileNames(readdirSync(plansDir), slug);
-  } catch {
-    return [];
-  }
+  const baseline = resolveApprovedPlanBaselineForSlug(repoRoot, slug);
+  return baseline.baselineState === 'missing-test-spec'
+    ? baseline.baselineIssues.slice(1)
+    : [];
 }
 
 export function buildContextPackBasis(repoRoot: string, slug: string): ContextPackBasis | null {
-  const plansDir = join(repoRoot, '.omx', 'plans');
-  if (!existsSync(plansDir)) {
-    return null;
-  }
-
-  let artifactFileSelection: ReturnType<typeof resolvePlanningArtifactFileSelection>;
-  try {
-    artifactFileSelection = resolvePlanningArtifactFileSelection(readdirSync(plansDir), slug);
-  } catch {
-    return null;
-  }
-
-  if (!artifactFileSelection || artifactFileSelection.testSpecFileNames.length === 0) {
-    return null;
-  }
-
-  const prdRelativePath = normalizePlanningRepoRelativePath(join('.omx', 'plans', artifactFileSelection.prdFileName));
-  const prdAbsolutePath = join(repoRoot, prdRelativePath);
-  const testSpecRelativePaths = artifactFileSelection.testSpecFileNames
-    .map((fileName) => normalizePlanningRepoRelativePath(join('.omx', 'plans', fileName)));
-
-  return {
-    prd: {
-      path: prdRelativePath,
-      sha1: computeContextPackObjectSha1(prdAbsolutePath),
-    },
-    testSpecs: testSpecRelativePaths.map((relativePath) => ({
-      path: relativePath,
-      sha1: computeContextPackObjectSha1(join(repoRoot, relativePath)),
-    })),
-  };
+  return resolveApprovedPlanBaselineForSlug(repoRoot, slug, { includeBasis: true }).basis ?? null;
 }
 
 function ensureAllowedKeys(

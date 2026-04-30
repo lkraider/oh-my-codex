@@ -141,6 +141,42 @@ export function selectMatchingTestSpecsForPrd(
   };
 }
 
+function formatPlanningArtifactFileNames(paths: readonly string[]): string {
+  return paths.map((path) => `\`${basename(path)}\``).join(', ');
+}
+
+export function describeTimestampedMissingBaselineIssues(
+  prdPath: string | null,
+  testSpecPaths: readonly string[],
+): string[] {
+  if (!prdPath) {
+    return [];
+  }
+
+  const prdArtifact = parsePlanningArtifactFileName(prdPath);
+  const selection = selectMatchingTestSpecsForPrd(prdPath, testSpecPaths);
+  if (
+    prdArtifact?.kind !== 'prd'
+    || selection.paths.length > 0
+    || !selection.requiredTimestampedFileName
+  ) {
+    return [];
+  }
+
+  const matchingTestSpecPaths = new Set(selection.paths);
+  const nonMatchingTestSpecPaths = [...new Set(
+    testSpecPaths
+      .filter((path) => planningArtifactSlug(path, 'test-spec') === prdArtifact.slug)
+      .sort(comparePlanningArtifactPaths)
+      .filter((path) => !matchingTestSpecPaths.has(path)),
+  )];
+  const issues = [`Approved timestamped plan requires test spec \`${selection.requiredTimestampedFileName}\`.`];
+  if (nonMatchingTestSpecPaths.length > 0) {
+    issues.push(`Found non-matching test-spec files: ${formatPlanningArtifactFileNames(nonMatchingTestSpecPaths)}.`);
+  }
+  return issues;
+}
+
 export function selectLatestPlanningArtifactPath(paths: readonly string[]): string | null {
   return [...paths].sort(comparePlanningArtifactPaths).at(-1) ?? null;
 }

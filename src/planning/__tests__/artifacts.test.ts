@@ -323,10 +323,11 @@ describe('planning artifacts', () => {
     assert.equal(selection.prdPath, join(plansDir, 'prd-20260427T153100Z-alpha.md'));
     assert.deepEqual(selection.testSpecPaths, []);
     assert.equal(selection.contextPackStatus, 'missing-baseline');
-    assert.ok(selection.contextPackIssues.includes('Approved plan is missing a matching test spec.'));
-    assert.ok(selection.contextPackIssues.includes(
+    assert.deepEqual(selection.contextPackIssues, [
+      'Approved plan is missing a matching test spec.',
       'Approved timestamped plan requires test spec `test-spec-20260427T153100Z-alpha.md`.',
-    ));
+      'Found non-matching test-spec files: `test-spec-alpha.md`, `testspec-20260427T153100Z-alpha.md`.',
+    ]);
 
     const artifacts = readPlanningArtifacts(tempDir);
     assert.equal(isPlanningComplete(artifacts), false);
@@ -336,9 +337,11 @@ describe('planning artifacts', () => {
     assert.equal(hint?.task, 'Execute alpha');
     assert.equal(hint?.contextPackStatus, 'missing-baseline');
     assert.deepEqual(hint?.testSpecPaths, []);
-    assert.ok(hint?.contextPackIssues.includes(
+    assert.deepEqual(hint?.contextPackIssues, [
+      'Approved plan is missing a matching test spec.',
       'Approved timestamped plan requires test spec `test-spec-20260427T153100Z-alpha.md`.',
-    ));
+      'Found non-matching test-spec files: `test-spec-alpha.md`, `testspec-20260427T153100Z-alpha.md`.',
+    ]);
   });
 
   it('uses compatibility fallback when the approved plan declares context packs but required roles are missing', async () => {

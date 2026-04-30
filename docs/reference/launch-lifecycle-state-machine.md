@@ -102,6 +102,12 @@ DeepInterviewSpecs(cwd) ::= ordered canonical discovered .omx/specs/deep-intervi
 Packs(cwd)              ::= ordered canonical discovered .omx/context/context-<timestamp>-<slug>.json
 
 LatestPRD(cwd) ::= last(PRDs(cwd)) when |PRDs(cwd)| > 0 else ⊥
+
+BaselinePRD(cwd, s) ::=
+  latest timestamped p ∈ PRDs(cwd) with slug(p) = s when any timestamped same-slug PRD exists
+  else exact legacy .omx/plans/prd-<s>.md when present
+  else last({p ∈ PRDs(cwd) | slug(p) = s}) when |{p ∈ PRDs(cwd) | slug(p) = s}| > 0
+  else ⊥
 ```
 
 Timestamped PRD/test-spec names use the same timestamp token shape as context
@@ -114,6 +120,11 @@ accepts the exact canonical `test-spec-<timestamp>-<slug>.md`; legacy slug-only
 files and timestamped `testspec-*` aliases do not satisfy the baseline.
 Deep-interview spec matching is slug-based after stripping an optional leading
 timestamp, with timestamped specs naturally ordered after legacy specs.
+
+PRD and test-spec discovery is case-insensitive by basename contract for
+compatibility. Lowercase repair guidance remains canonical, and slug-based
+basis, sync, and handoff resolution uses `BaselinePRD(cwd, s)` rather than the
+generic `LatestPRD(cwd)` ordering.
 
 Accepted PRD inputs preserve canonical membership and persisted identity:
 

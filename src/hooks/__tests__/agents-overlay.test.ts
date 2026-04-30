@@ -314,6 +314,67 @@ describe("generateOverlay", () => {
     assert.match(overlay, /`test-spec-\*\.md`/);
   });
 
+  it("reports only the PRD as missing when a test spec already exists before PRD creation", async () => {
+    const sessionId = "ralph-gate-missing-prd-only";
+    const sessionDir = join(tempDir, ".omx", "state", "sessions", sessionId);
+    await mkdir(sessionDir, { recursive: true });
+    await writeFile(
+      join(sessionDir, "ralph-state.json"),
+      JSON.stringify({
+        active: true,
+        iteration: 0,
+        max_iterations: 50,
+        current_phase: "starting",
+      }),
+    );
+    const plansDir = join(tempDir, ".omx", "plans");
+    await mkdir(plansDir, { recursive: true });
+    await writeFile(join(plansDir, "test-spec-issue-259.md"), "# Test Spec\n");
+
+    const overlay = await generateOverlay(tempDir, sessionId);
+    assert.match(overlay, /\*\*Ralph Ralplan-First Gate:\*\* BLOCKED/);
+    assert.match(overlay, /Missing: `prd-\*\.md`/);
+    assert.doesNotMatch(overlay, /Missing: `prd-\*\.md`, `test-spec-\*\.md`/);
+  });
+
+  it("surfaces timestamped missing-baseline guidance when only near-miss test specs exist", async () => {
+    const sessionId = "ralph-gate-timestamped-missing-baseline";
+    const sessionDir = join(tempDir, ".omx", "state", "sessions", sessionId);
+    await mkdir(sessionDir, { recursive: true });
+    await writeFile(
+      join(sessionDir, "ralph-state.json"),
+      JSON.stringify({
+        active: true,
+        iteration: 0,
+        max_iterations: 50,
+        current_phase: "starting",
+      }),
+    );
+    const plansDir = join(tempDir, ".omx", "plans");
+    await mkdir(plansDir, { recursive: true });
+    try {
+      await writeFile(join(plansDir, "prd-20260427T153100Z-issue-259.md"), "# PRD\n");
+      await writeFile(join(plansDir, "test-spec-issue-259.md"), "# Legacy Test Spec\n");
+      await writeFile(
+        join(plansDir, "testspec-20260427T153100Z-issue-259.md"),
+        "# Deprecated Timestamped Alias\n",
+      );
+
+      const overlay = await generateOverlay(tempDir, sessionId);
+      assert.match(overlay, /\*\*Ralph Ralplan-First Gate:\*\* BLOCKED/);
+      assert.match(
+        overlay,
+        /Approved timestamped plan requires test spec `test-spec-20260427T153100Z-issue-259\.md`\./,
+      );
+      assert.match(
+        overlay,
+        /Found non-matching test-spec files: `test-spec-issue-259\.md`, `testspec-20260427T153100Z-issue-259\.md`\./,
+      );
+    } finally {
+      await rm(plansDir, { recursive: true, force: true });
+    }
+  });
+
   it("unlocks ralph planning gate when PRD and test spec exist", async () => {
     const sessionId = "ralph-gate-unlocked";
     const sessionDir = join(tempDir, ".omx", "state", "sessions", sessionId);

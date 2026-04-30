@@ -3,9 +3,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import {
-  buildContextPackBasis,
   CONTEXT_PACK_ROLES,
-  describeContextPackBasisResolutionIssues,
   filterContextPackEntries,
   findMissingContextPackRoles,
   formatRelationPath,
@@ -23,6 +21,7 @@ import {
   type ContextPackSelector,
   type ContextPackRole,
 } from './context-packs.js';
+import { resolveApprovedPlanBaselineForSlug } from './approved-plan-lifecycle.js';
 import { isCanonicalContextPackPath, normalizePlanningRepoRelativePath } from './path-utils.js';
 import { readContextPackHandoffStatus, type ContextPackHandoffStatusSnapshot } from './artifacts.js';
 
@@ -545,9 +544,11 @@ async function runSync(cwd: string, args: readonly string[]): Promise<void> {
     throw new Error(`Could not read context pack: ${packPath}`);
   }
   const repoRoot = resolveContextPackRepoRoot(packPath, workspaceRoot);
-  const basis = buildContextPackBasis(repoRoot, document.slug);
-  if (!basis) {
-    const basisIssues = describeContextPackBasisResolutionIssues(repoRoot, document.slug);
+  const baseline = resolveApprovedPlanBaselineForSlug(repoRoot, document.slug);
+  if (baseline.baselineState !== 'present') {
+    const basisIssues = baseline.baselineState === 'missing-test-spec'
+      ? baseline.baselineIssues.slice(1)
+      : [];
     throw new Error(
       basisIssues.length > 0
         ? `Could not resolve approved PRD/test-spec basis for slug ${document.slug}. ${basisIssues.join(' ')}`

@@ -412,6 +412,33 @@ describe('context-tool', () => {
     ]);
   });
 
+  it('sync refreshes basis from a legacy case-variant PRD when no exact basename exists', async () => {
+    const slug = 'issue-case-sync';
+    await mkdir(join(tempDir, 'docs'), { recursive: true });
+    await mkdir(join(tempDir, '.omx', 'plans'), { recursive: true });
+    await writeFile(join(tempDir, '.omx', 'plans', `PRD-${slug}.md`), '# PRD\n\nApproved context basis.\n');
+    await writeFile(join(tempDir, '.omx', 'plans', `test-spec-${slug}.md`), '# Test Spec\n\nApproved test basis.\n');
+    await writeFile(join(tempDir, 'docs', 'quickstart.md'), '# Quickstart\n\nStart here.\n');
+    await writeFile(join(tempDir, 'docs', 'boundary.md'), '# Boundary\n\nStay inside the approved slice.\n');
+    await writeFile(join(tempDir, 'docs', 'acceptance.md'), '# Acceptance\n\nVerify the approved slice.\n');
+
+    await contextToolMain(['add', packRelativePath(slug), 'docs/quickstart.md'], tempDir);
+    await contextToolMain(['add', packRelativePath(slug), 'docs/boundary.md', '--role', 'scope'], tempDir);
+    await contextToolMain(['add', packRelativePath(slug), 'docs/acceptance.md', '--role', 'verify'], tempDir);
+    await contextToolMain(['sync', packRelativePath(slug)], tempDir);
+
+    const document = JSON.parse(await readFile(packAbsolutePath(slug), 'utf-8')) as {
+      basis?: {
+        prd: { path: string };
+        testSpecs: Array<{ path: string }>;
+      };
+    };
+    assert.equal(document.basis?.prd.path, `.omx/plans/PRD-${slug}.md`);
+    assert.deepEqual(document.basis?.testSpecs.map((testSpec) => testSpec.path), [
+      `.omx/plans/test-spec-${slug}.md`,
+    ]);
+  });
+
   it('sync refreshes basis after the approved handoff files exist', async () => {
     await mkdir(join(tempDir, 'docs'), { recursive: true });
     await writeFile(join(tempDir, 'docs', 'quickstart.md'), '# Quickstart\n\nStart here.\n');
