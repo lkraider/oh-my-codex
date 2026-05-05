@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-04-24T07:34:27.399Z",
+  "generatedAt": "2026-05-04T11:42:48.831Z",
   "version": "2026.02.28.1",
   "counts": {
-    "skillCount": 42,
+    "skillCount": 45,
     "promptCount": 30,
-    "activeSkillCount": 27,
+    "activeSkillCount": 30,
     "activeAgentCount": 18
   },
   "coreSkills": [
@@ -12,6 +12,7 @@
     "ralph",
     "ultrawork",
     "team",
+    "ultragoal",
     "ralplan"
   ],
   "skills": [
@@ -66,10 +67,31 @@
       "internalRequired": false
     },
     {
+      "name": "autoresearch-goal",
+      "category": "execution",
+      "status": "active",
+      "core": false,
+      "internalRequired": false
+    },
+    {
+      "name": "performance-goal",
+      "category": "execution",
+      "status": "active",
+      "core": false,
+      "internalRequired": false
+    },
+    {
       "name": "pipeline",
       "category": "execution",
       "status": "active",
       "core": false,
+      "internalRequired": false
+    },
+    {
+      "name": "ultragoal",
+      "category": "execution",
+      "status": "active",
+      "core": true,
       "internalRequired": false
     },
     {

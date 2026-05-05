@@ -11,6 +11,11 @@ import { codexHome, listInstalledSkillDirectories } from "../utils/paths.js";
 import { sleep } from "../utils/sleep.js";
 import type { ApprovedRepositoryContextSummary } from "../planning/artifacts.js";
 import type { TeamReminderDirective } from "./reminder-intents.js";
+import {
+  buildTeamWorkerGoalInstruction,
+  renderTeamWorkerGoalInstruction,
+  type TeamWorkerGoalInstruction,
+} from "./goal-workflow.js";
 import type { TaskHintSummary } from "./repo-aware-decomposition.js";
 
 const TEAM_OVERLAY_START = "<!-- OMX:TEAM:WORKER:START -->";
@@ -704,6 +709,7 @@ export function generateInitialInbox(
     approvedContextSection?: string;
     taskHints?: Record<string, TaskHintSummary>;
     approvedContextSummary?: ApprovedRepositoryContextSummary;
+    workerGoalInstruction?: TeamWorkerGoalInstruction;
   } = {},
 ): string {
   const taskList = tasks
@@ -745,6 +751,9 @@ export function generateInitialInbox(
   const approvedHandoffSection = options.approvedContextSection
     ? `\n## Approved Handoff Context\n\n${options.approvedContextSection}\n`
     : "";
+  const workerGoalSection = renderTeamWorkerGoalInstruction(
+    options.workerGoalInstruction,
+  );
   const delegationSection = renderDelegationContracts(tasks);
 
   const approvedRepositoryContextSection = options.approvedContextSummary
@@ -772,7 +781,7 @@ ${options.approvedContextSummary.content}
 ## Your Assigned Tasks
 
 ${taskList}
-${approvedHandoffSection}${approvedRepositoryContextSection}
+${approvedHandoffSection}${approvedRepositoryContextSection}${workerGoalSection}
 ## Instructions
 
 1. Load and follow the worker skill from the first existing path:
@@ -872,6 +881,11 @@ export function generateTaskAssignmentInbox(
   const approvedContextSection = options.approvedContextSection
     ? `\n## Approved Handoff Context\n\n${options.approvedContextSection}\n`
     : "";
+  const workerGoalSection = typeof taskOrId === "string"
+    ? ""
+    : renderTeamWorkerGoalInstruction(
+      buildTeamWorkerGoalInstruction(teamName, workerName, [task as TeamTask]),
+    );
   const delegationSection = renderDelegationContracts([task as TeamTask]);
   return `# New Task Assignment
 
@@ -882,6 +896,7 @@ export function generateTaskAssignmentInbox(
 
 ${taskDescription}
 ${approvedContextSection}
+${workerGoalSection}
 
 ## Instructions
 

@@ -1,7 +1,16 @@
 import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { describe, it, type TestContext } from 'node:test';
-import { isRealTmuxAvailable, tmuxSessionExists, withTempTmuxSession } from './tmux-test-fixture.js';
+import { existsSync } from 'node:fs';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  isRealTmuxAvailable,
+  REAL_TMUX_COMMAND,
+  tmuxSessionExists,
+  withTempTmuxSession,
+} from './tmux-test-fixture.js';
 
 function skipUnlessTmux(t: TestContext): void {
   if (!isRealTmuxAvailable()) {
@@ -10,7 +19,7 @@ function skipUnlessTmux(t: TestContext): void {
 }
 
 function runAmbientTmux(args: string[]): string {
-  return execFileSync('tmux', args, {
+  return execFileSync(REAL_TMUX_COMMAND, args, {
     encoding: 'utf-8',
     env: {
       ...process.env,
@@ -136,5 +145,37 @@ describe('withTempTmuxSession', () => {
     });
 
     assert.equal(ambientSessionExists(sessionName), false);
+  });
+
+  it('uses the real tmux binary even when PATH is temporarily polluted', async (t) => {
+    skipUnlessTmux(t);
+    const fakeBinDir = await mkdtemp(join(tmpdir(), 'omx-fake-tmux-'));
+    const fakeTmuxPath = join(fakeBinDir, 'tmux');
+    const fakeLogPath = join(fakeBinDir, 'fake-tmux.log');
+    const previousPath = process.env.PATH;
+
+    try {
+      await writeFile(
+        fakeTmuxPath,
+        `#!/usr/bin/env bash
+set -eu
+echo "fake tmux" >> "${fakeLogPath}"
+exit 0
+`,
+      );
+      await chmod(fakeTmuxPath, 0o755);
+      process.env.PATH = `${fakeBinDir}:${previousPath ?? ''}`;
+
+      await withTempTmuxSession(async (fixture) => {
+        assert.match(fixture.sessionName, /^omx-test-/);
+        assert.equal(fixture.sessionExists(), true);
+      });
+
+      assert.equal(existsSync(fakeLogPath), false, 'fixture helper should bypass PATH-injected fake tmux binaries');
+    } finally {
+      if (typeof previousPath === 'string') process.env.PATH = previousPath;
+      else delete process.env.PATH;
+      await rm(fakeBinDir, { recursive: true, force: true });
+    }
   });
 });

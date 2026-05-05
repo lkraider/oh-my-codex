@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import {
   readPlanningArtifacts,
@@ -141,6 +141,21 @@ describe('approved-plan lifecycle', () => {
     assert.equal(plansRelative.canonicalPrdPath, join(plansDir, 'prd-alpha.md'));
     assert.equal(missingAbsolute.baselineState, 'missing-prd');
     assert.equal(missingRelative.baselineState, 'missing-prd');
+  });
+
+  it('accepts equivalent relative approved PRD paths through canonical file identity', async () => {
+    const plansDir = await writePlanFiles({
+      'prd-alpha.md': '# Alpha\n',
+      'test-spec-alpha.md': '# Alpha Test Spec\n',
+    });
+    const artifacts = readPlanningArtifacts(tempDir);
+    const equivalentRelativePath = `../${basename(tempDir)}/.omx/plans/prd-alpha.md`;
+
+    const baseline = resolveApprovedPlanBaseline(artifacts, equivalentRelativePath);
+
+    assert.equal(baseline.prdPath, join(plansDir, 'prd-alpha.md'));
+    assert.equal(baseline.canonicalPrdPath, join(plansDir, 'prd-alpha.md'));
+    assert.deepEqual(baseline.testSpecPaths, [join(plansDir, 'test-spec-alpha.md')]);
   });
 
   it('reports missing-prd when no canonical approved plan can be resolved', () => {

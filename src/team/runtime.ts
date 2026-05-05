@@ -124,6 +124,7 @@ import {
   type TeamReasoningEffort,
 } from './model-contract.js';
 import { resolveCanonicalTeamStateRoot } from './state-root.js';
+import { buildInternalTeamName, resolveTeamIdentityScope, resolveTeamNameForCurrentContext } from './team-identity.js';
 import { inferPhaseTargetFromTaskCounts, reconcilePhaseStateForMonitor } from './phase-controller.js';
 import { getTeamTmuxSessions } from '../notifications/tmux.js';
 import { hasStructuredVerificationEvidence } from '../verification/verifier.js';
@@ -148,7 +149,10 @@ import {
   writePersistedApprovedTeamExecutionBinding,
   type ApprovedTeamExecutionBinding,
 } from './approved-execution.js';
-import { isApprovedExecutionContextReadyStatus } from '../planning/artifacts.js';
+import {
+  isApprovedExecutionContextReadyStatus,
+  isApprovedExecutionFollowupReadyStatus,
+} from '../planning/artifacts.js';
 import {
   assertCleanLeaderWorkspaceForWorkerWorktrees,
   ensureWorktree,
@@ -1991,6 +1995,22 @@ export { TEAM_LOW_COMPLEXITY_DEFAULT_MODEL };
 
 export { resolveCanonicalTeamStateRoot };
 
+export function teamRuntimeTeamsRoot(cwd: string): string {
+  return join(resolveCanonicalTeamStateRoot(cwd), 'team');
+}
+
+export function teamRuntimeTeamRoot(teamName: string, cwd: string): string {
+  return join(teamRuntimeTeamsRoot(cwd), teamName);
+}
+
+export function teamStartupTimingPath(teamName: string, cwd: string): string {
+  return join(teamRuntimeTeamRoot(teamName, cwd), 'startup-timing.json');
+}
+
+export function teamRuntimeSessionPath(cwd: string): string {
+  return join(resolveCanonicalTeamStateRoot(cwd), 'session.json');
+}
+
 function spawnPromptWorker(
   teamName: string,
   workerName: string,
@@ -2159,13 +2179,27 @@ export async function startTeam(
   const leaderCwd = resolve(cwd);
   await assertNestedTeamAllowed(leaderCwd);
   const effectiveWorktreeMode = resolveEffectiveTeamWorktreeMode(leaderCwd, options.worktreeMode);
-  const sanitized = sanitizeTeamName(teamName);
-  const leaderSessionId = await resolveLeaderSessionId(leaderCwd);
-
-  await assertTeamStartupIsNonDestructive(sanitized, leaderCwd, leaderSessionId);
-
+  const displayName = sanitizeTeamName(teamName);
   const workerLaunchMode = resolveTeamWorkerLaunchMode(process.env);
   const displayMode = workerLaunchMode === 'interactive' ? 'split_pane' : 'auto';
+  const rawIdentityScope = resolveTeamIdentityScope(process.env);
+  const resolvedLeaderSessionId = await resolveLeaderSessionId(leaderCwd);
+  const identityScope = rawIdentityScope.source === 'run-id'
+    ? (resolvedLeaderSessionId
+      ? { ...rawIdentityScope, sessionId: resolvedLeaderSessionId, runId: '' }
+      : {
+        ...rawIdentityScope,
+        runId: `cwd:${leaderCwd}`,
+      })
+    : rawIdentityScope;
+  const sanitized = buildInternalTeamName(displayName, identityScope);
+  const leaderSessionId = identityScope.sessionId || identityScope.paneId || identityScope.tmuxTarget || identityScope.runId;
+
+  await assertTeamStartupIsNonDestructive(sanitized, leaderCwd, leaderSessionId);
+  if (displayName !== sanitized) {
+    await assertTeamStartupIsNonDestructive(displayName, leaderCwd, leaderSessionId);
+  }
+
   if (workerLaunchMode === 'interactive') {
     if (!isTmuxAvailable()) {
       throw new Error('Team mode requires tmux. Install with: apt install tmux / brew install tmux');
@@ -2245,7 +2279,7 @@ export async function startTeam(
   if (
     requestedApprovedExecution
     && selectedApprovedHint
-    && !isApprovedExecutionContextReadyStatus(selectedApprovedHint.contextPackStatus)
+    && !isApprovedExecutionFollowupReadyStatus(selectedApprovedHint.contextPackStatus)
   ) {
     throw new Error(
       `approved_execution_binding_nonready:${requestedApprovedExecution.prd_path}:${requestedApprovedExecution.task}:${selectedApprovedHint.contextPackStatus}`,
@@ -2318,11 +2352,19 @@ export async function startTeam(
       workerCount,
       leaderCwd,
       DEFAULT_MAX_WORKERS,
-      { ...process.env, OMX_TEAM_DISPLAY_MODE: displayMode, OMX_TEAM_WORKER_LAUNCH_MODE: workerLaunchMode },
+      {
+        ...process.env,
+        OMX_SESSION_ID: leaderSessionId,
+        OMX_TEAM_DISPLAY_MODE: displayMode,
+        OMX_TEAM_WORKER_LAUNCH_MODE: workerLaunchMode,
+      },
       {
         leader_cwd: leaderCwd,
         team_state_root: teamStateRoot,
         workspace_mode: workspaceMode,
+        display_name: displayName,
+        requested_name: displayName,
+        identity_source: identityScope.source,
         worktree_mode: effectiveWorktreeMode,
       },
       'default',
@@ -2333,6 +2375,9 @@ export async function startTeam(
     config.leader_cwd = leaderCwd;
     config.team_state_root = teamStateRoot;
     config.workspace_mode = workspaceMode;
+    config.display_name = displayName;
+    config.requested_name = displayName;
+    config.identity_source = identityScope.source;
     config.worktree_mode = effectiveWorktreeMode;
     await writePersistedApprovedTeamExecutionBinding(sanitized, leaderCwd, approvedExecution, teamStateRoot);
 
@@ -2495,6 +2540,7 @@ export async function startTeam(
         [TEAM_STATE_ROOT_ENV]: teamStateRoot,
         [TEAM_LEADER_CWD_ENV]: leaderCwd,
         [MODEL_INSTRUCTIONS_FILE_ENV]: plan.instructionsFilePath,
+        OMX_TEAM_DISPLAY_NAME: displayName,
       };
       if (plan.workerWorkspace.worktreePath) {
         env.OMX_TEAM_WORKTREE_PATH = plan.workerWorkspace.worktreePath;
@@ -2667,6 +2713,7 @@ export async function startTeam(
           inbox,
           triggerMessage: trigger,
           intent: triggerIntent,
+          taskIds: workerTasks.map((task) => task.id),
           cwd: leaderCwd,
           timing: startupTiming,
         })
@@ -2930,7 +2977,7 @@ export async function startTeam(
  */
 export async function monitorTeam(teamName: string, cwd: string): Promise<TeamSnapshot | null> {
   const monitorStartMs = performance.now();
-  const sanitized = sanitizeTeamName(teamName);
+  const sanitized = resolveTeamNameForCurrentContext(teamName, cwd);
   const config = await readTeamConfig(sanitized, cwd);
   if (!config) return null;
   const manifest = await readTeamManifestV2(sanitized, cwd);
@@ -3327,6 +3374,22 @@ export async function reassignTask(
   await assignTask(teamName, toWorker, taskId, cwd);
 }
 
+function resolveCommitHygieneArtifactTeamNames(config: TeamConfig, internalTeamName: string): string[] {
+  const names: string[] = [];
+  for (const value of [config.requested_name, config.display_name, internalTeamName]) {
+    if (typeof value !== 'string' || value.trim() === '') continue;
+    try {
+      const sanitized = sanitizeTeamName(value);
+      if (!names.includes(sanitized)) names.push(sanitized);
+    } catch {
+      // Persisted display/request names are best-effort aliases. If an older
+      // state file contains an invalid value, fall back to the internal name.
+    }
+  }
+  if (!names.includes(internalTeamName)) names.push(internalTeamName);
+  return names;
+}
+
 /**
  * Graceful shutdown: send shutdown inbox to all workers, wait, force kill, cleanup.
  */
@@ -3334,7 +3397,7 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
   const force = options.force === true;
   const confirmIssues = options.confirmIssues === true;
   let skipWorkerAcks = false;
-  const sanitized = sanitizeTeamName(teamName);
+  const sanitized = resolveTeamNameForCurrentContext(teamName, cwd);
   const config = await readTeamConfig(sanitized, cwd);
   if (!config) {
     // No config -- just try to kill tmux session and clean up
@@ -3620,14 +3683,22 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
   }
 
   const artifactCwd = resolveTeamCommitHygieneArtifactCwd(config, cwd);
-  const ledger = await appendTeamCommitHygieneEntries(sanitized, commitHygieneEntries, artifactCwd)
   const taskView = await listTasks(sanitized, cwd).catch(() => [])
-  const commitHygieneContext = buildTeamCommitHygieneContext({
-    teamName: sanitized,
-    tasks: taskView,
-    ledger,
-  })
-  const commitHygieneArtifacts = await writeTeamCommitHygieneContext(sanitized, commitHygieneContext, artifactCwd)
+  const internalLedger = await appendTeamCommitHygieneEntries(sanitized, commitHygieneEntries, artifactCwd)
+  const commitHygieneArtifactTeamNames = resolveCommitHygieneArtifactTeamNames(config, sanitized);
+  let commitHygieneArtifacts: TeamCommitHygieneArtifactPaths | null = null;
+  for (const artifactTeamName of commitHygieneArtifactTeamNames) {
+    const ledger = artifactTeamName === sanitized
+      ? internalLedger
+      : await appendTeamCommitHygieneEntries(artifactTeamName, internalLedger.entries, artifactCwd)
+    const commitHygieneContext = buildTeamCommitHygieneContext({
+      teamName: artifactTeamName,
+      tasks: taskView,
+      ledger,
+    })
+    const writtenArtifacts = await writeTeamCommitHygieneContext(artifactTeamName, commitHygieneContext, artifactCwd)
+    commitHygieneArtifacts ??= writtenArtifacts
+  }
 
   // 5. Remove worker worktree-root instructions and team-scoped fallback instructions.
   for (const worker of config.workers) {
@@ -3684,11 +3755,41 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
 /**
  * Resume monitoring an existing team.
  */
-export async function resumeTeam(teamName: string, cwd: string): Promise<TeamRuntime | null> {
-  const sanitized = sanitizeTeamName(teamName);
+export async function resumeTeam(
+  teamName: string,
+  cwd: string,
+  options: { allowApprovedExecutionFallback?: boolean } = {},
+): Promise<TeamRuntime | null> {
+  const sanitized = resolveTeamNameForCurrentContext(teamName, cwd);
   const config = await readTeamConfig(sanitized, cwd);
   if (!config) return null;
   config.lifecycle_profile = 'default';
+  const leaderCwd = config.leader_cwd ?? cwd;
+  const allowApprovedExecutionFallback = options.allowApprovedExecutionFallback === true;
+  const approvedExecutionState = await resolvePersistedApprovedTeamExecutionContinuityState(
+    sanitized,
+    leaderCwd,
+    config.team_state_root ?? resolveCanonicalTeamStateRoot(leaderCwd),
+  );
+  if (approvedExecutionState.status === 'malformed') {
+    if (!allowApprovedExecutionFallback) {
+      throw new Error(`approved_execution_binding_malformed:${sanitized}`);
+    }
+  }
+  if (approvedExecutionState.status === 'stale') {
+    if (!allowApprovedExecutionFallback) {
+      throw new Error(
+        `approved_execution_binding_stale:${approvedExecutionState.binding.prd_path}:${approvedExecutionState.binding.task}`,
+      );
+    }
+  }
+  if (approvedExecutionState.status === 'nonready') {
+    if (!allowApprovedExecutionFallback) {
+      throw new Error(
+        `approved_execution_binding_nonready:${approvedExecutionState.binding.prd_path}:${approvedExecutionState.binding.task}:${approvedExecutionState.approvedHint.contextPackStatus}`,
+      );
+    }
+  }
 
   if (config.worker_launch_mode === 'prompt') {
     const handleTeamConfig = { ...config, name: sanitized };
@@ -4026,6 +4127,7 @@ async function attemptStartupDirectTrigger(params: {
   inbox: string;
   triggerMessage: string;
   intent?: TeamReminderIntent;
+  taskIds: string[];
   cwd: string;
   timing: StartupTimingRecorder;
 }): Promise<DispatchOutcome | null> {
@@ -4039,6 +4141,7 @@ async function attemptStartupDirectTrigger(params: {
     inbox,
     triggerMessage,
     intent,
+    taskIds,
     cwd,
     timing,
   } = params;
@@ -4086,10 +4189,11 @@ async function attemptStartupDirectTrigger(params: {
   });
   if (!queued.ok) return queued;
 
+  const effectiveWorkerCli = workerCli ?? 'codex';
   const workerStartupEvidence = await waitForWorkerStartupEvidence({
     teamName,
     workerName,
-    workerCli: workerCli ?? 'codex',
+    workerCli: effectiveWorkerCli,
     cwd,
     timeoutMs: 0,
     pollMs: STARTUP_EVIDENCE_POLL_MS,
@@ -4103,9 +4207,22 @@ async function attemptStartupDirectTrigger(params: {
     request_id: queued.request_id,
   });
 
+  const reason = workerStartupEvidence === 'none'
+    ? `${effectiveWorkerCli}_startup_direct_no_evidence:${safety.reason}`
+    : `startup_direct_trigger_sent:${safety.reason}`;
+  if ((effectiveWorkerCli === 'codex' || effectiveWorkerCli === 'claude') && workerStartupEvidence === 'none') {
+    await recordRecoverableStartupIssue({
+      teamName,
+      workerName,
+      taskIds,
+      reason,
+      cwd,
+    });
+  }
+
   return {
     ...queued,
-    reason: `startup_direct_trigger_sent:${safety.reason}`,
+    reason,
   };
 }
 

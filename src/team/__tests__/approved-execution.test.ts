@@ -11,6 +11,7 @@ import {
   readApprovedTeamExecutionHintFromBinding,
   readBoundApprovedTeamExecutionState,
   readPersistedApprovedTeamExecutionBinding,
+  readPersistedApprovedTeamExecutionBindingStateSync,
   readPersistedApprovedTeamExecutionHint,
   resolvePersistedApprovedTeamExecutionContinuityState,
   resolveApprovedTeamExecutionHint,
@@ -264,6 +265,52 @@ describe('approved team execution integration', () => {
     }
   });
 
+  it('resolves approved bindings through canonical PRD identity when the persisted path is an alias', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-approved-alias-binding-'));
+    const approvedTask = 'Execute approved issue 1311 alias plan';
+    try {
+      const { prdPath } = await writeApprovedTeamHandoffFiles(cwd, 'issue-1311-alias', approvedTask);
+      const repoName = cwd.split('/').at(-1) ?? '';
+      const aliasedPrdPath = `${cwd}/../${repoName}/.omx/plans/prd-issue-1311-alias.md`;
+
+      const approvedHint = resolveApprovedTeamExecutionHint(cwd, {
+        approvedExecution: {
+          prd_path: aliasedPrdPath,
+          task: approvedTask,
+        },
+      });
+
+      assert.equal(approvedHint?.sourcePath, prdPath);
+      assert.equal(approvedHint?.task, approvedTask);
+      assert.ok((approvedHint?.contextRefs.length ?? 0) > 0);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects unsafe team names before resolving approved binding paths', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-approved-unsafe-team-'));
+    try {
+      await assert.rejects(
+        () => writePersistedApprovedTeamExecutionBinding('../escape', cwd, {
+          prd_path: join(cwd, '.omx', 'plans', 'prd-alpha.md'),
+          task: 'Execute approved alpha plan',
+        }),
+        /invalid_team_name:\.\.\/escape/,
+      );
+      assert.equal(
+        existsSync(join(cwd, '.omx', 'state', 'escape', 'approved-execution.json')),
+        false,
+      );
+      assert.throws(
+        () => readPersistedApprovedTeamExecutionBindingStateSync('../escape', cwd),
+        /invalid_team_name:\.\.\/escape/,
+      );
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('falls back to root team state when the current session-scoped team state is inactive', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-team-approved-inactive-session-fallback-'));
     const approvedTask = 'Execute approved issue 1312 plan';
@@ -370,20 +417,20 @@ describe('approved team execution integration', () => {
         join(cwd, '.omx', 'state', 'team-state.json'),
         `${JSON.stringify({
           active: true,
-          team_name: 'bound-team-root-malformed-fallback',
+          team_name: 'bound-root-malformed',
           task_description: approvedTask,
           agent_count: 3,
         }, null, 2)}\n`,
       );
-      await writePersistedApprovedTeamExecutionBinding('bound-team-root-malformed-fallback', cwd, {
+      await writePersistedApprovedTeamExecutionBinding('bound-root-malformed', cwd, {
         prd_path: prdPath,
         task: approvedTask,
       });
 
       const boundState = readBoundApprovedTeamExecutionState(cwd);
-      assert.equal(boundState.teamName, 'bound-team-root-malformed-fallback');
+      assert.equal(boundState.teamName, 'bound-root-malformed');
       assert.equal(boundState.bindingConfigured, true);
-      assert.equal(boundState.teamState?.team_name, 'bound-team-root-malformed-fallback');
+      assert.equal(boundState.teamState?.team_name, 'bound-root-malformed');
       assert.equal(boundState.approvedHint?.task, approvedTask);
       assert.equal(boundState.approvedHint?.sourcePath, prdPath);
     } finally {
@@ -396,27 +443,27 @@ describe('approved team execution integration', () => {
     const approvedTask = 'Execute approved malformed binding state plan';
     try {
       await writeApprovedTeamHandoffFiles(cwd, 'malformed-binding-state', approvedTask);
-      await mkdir(join(cwd, '.omx', 'state', 'team', 'bound-team-malformed-binding-state'), { recursive: true });
+      await mkdir(join(cwd, '.omx', 'state', 'team', 'bound-malformed-state'), { recursive: true });
       await writeFile(
         join(cwd, '.omx', 'state', 'team-state.json'),
         `${JSON.stringify({
           active: true,
-          team_name: 'bound-team-malformed-binding-state',
+          team_name: 'bound-malformed-state',
           task_description: approvedTask,
           agent_count: 3,
         }, null, 2)}\n`,
       );
       await writeFile(
-        join(cwd, '.omx', 'state', 'team', 'bound-team-malformed-binding-state', 'approved-execution.json'),
+        join(cwd, '.omx', 'state', 'team', 'bound-malformed-state', 'approved-execution.json'),
         '{invalid json\n',
         'utf-8',
       );
 
       const boundState = readBoundApprovedTeamExecutionState(cwd);
-      assert.equal(boundState.teamName, 'bound-team-malformed-binding-state');
+      assert.equal(boundState.teamName, 'bound-malformed-state');
       assert.equal(boundState.bindingConfigured, true);
       assert.equal(boundState.bindingState, 'malformed');
-      assert.equal(boundState.teamState?.team_name, 'bound-team-malformed-binding-state');
+      assert.equal(boundState.teamState?.team_name, 'bound-malformed-state');
       assert.equal(boundState.approvedExecution, null);
       assert.equal(boundState.approvedHint, null);
     } finally {
@@ -451,21 +498,21 @@ describe('approved team execution integration', () => {
         join(cwd, '.omx', 'state', 'team-state.json'),
         `${JSON.stringify({
           active: true,
-          team_name: 'bound-team-root-incomplete-fallback',
+          team_name: 'bound-root-incomplete',
           task_description: approvedTask,
           agent_count: 4,
         }, null, 2)}\n`,
       );
-      await writePersistedApprovedTeamExecutionBinding('bound-team-root-incomplete-fallback', cwd, {
+      await writePersistedApprovedTeamExecutionBinding('bound-root-incomplete', cwd, {
         prd_path: prdPath,
         task: approvedTask,
       });
 
       const boundState = readBoundApprovedTeamExecutionState(cwd);
-      assert.equal(boundState.teamName, 'bound-team-root-incomplete-fallback');
+      assert.equal(boundState.teamName, 'bound-root-incomplete');
       assert.equal(boundState.bindingConfigured, true);
       assert.equal(boundState.bindingState, 'valid');
-      assert.equal(boundState.teamState?.team_name, 'bound-team-root-incomplete-fallback');
+      assert.equal(boundState.teamState?.team_name, 'bound-root-incomplete');
       assert.equal(boundState.approvedHint?.task, approvedTask);
       assert.equal(boundState.approvedHint?.sourcePath, prdPath);
     } finally {
@@ -473,7 +520,7 @@ describe('approved team execution integration', () => {
     }
   });
 
-  it('treats persisted plan-only bindings as nonready for approved-context continuity', async () => {
+  it('treats persisted plan-only bindings as valid follow-up continuity', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-team-approved-plan-only-continuity-'));
     const approvedTask = 'Execute approved plan-only task';
     const prdPath = join(cwd, '.omx', 'plans', 'prd-legacy-plan-only.md');
@@ -498,7 +545,7 @@ describe('approved team execution integration', () => {
         'bound-team-plan-only',
         cwd,
       );
-      assert.equal(continuity.status, 'nonready');
+      assert.equal(continuity.status, 'valid');
       assert.equal(continuity.approvedHint.contextPackStatus, 'plan-only');
       assert.equal(continuity.approvedHint.sourcePath, prdPath);
     } finally {
@@ -647,7 +694,7 @@ describe('approved team execution integration', () => {
 
     let runtime: TeamRuntime | null = null;
     try {
-      await writePersistedApprovedTeamExecutionBinding('team-approved-start-explicit-null', cwd, {
+      await writePersistedApprovedTeamExecutionBinding('team-explicit-null', cwd, {
         prd_path: prdPath,
         task: approvedTask,
         command: `omx team 1:executor ${JSON.stringify(approvedTask)}`,
@@ -656,7 +703,7 @@ describe('approved team execution integration', () => {
       runtime = await withMockPromptModeCodexAllowed(() =>
         withoutTeamWorkerEnv(() =>
           startTeam(
-            'team-approved-start-explicit-null',
+            'team-explicit-null',
             'generic team launch',
             'executor',
             1,

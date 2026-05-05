@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  decodeApprovedExecutionQuotedValue,
   isPlanningComplete,
   readApprovedExecutionLaunchHint,
   readLatestPlanningArtifacts,
@@ -24,6 +25,12 @@ import { readTeamDagHandoffForLatestPlan } from '../../team/dag-schema.js';
 
 let tempDir: string;
 const CONTEXT_PACK_SCHEMA = 'omx-context-pack-v1';
+
+function encodeApprovedExecutionTask(task: string, quote: 'single' | 'double'): string {
+  return quote === 'single'
+    ? `'${task.replace(/'/g, "\\'")}'`
+    : `"${task.replace(/"/g, '\\"')}"`;
+}
 
 function defaultReadFirstRef(
   slug: string,
@@ -112,6 +119,27 @@ function buildContextPackOutcome(
 describe('planning artifacts', () => {
   beforeEach(async () => { await setup(); });
   afterEach(async () => { await cleanup(); });
+
+  it('round-trips single-quoted approved execution tasks with only escaped apostrophes normalized', () => {
+    const task = String.raw`Fix Bob's regression in C:\\tmp`;
+    assert.equal(
+      decodeApprovedExecutionQuotedValue(encodeApprovedExecutionTask(task, 'single')),
+      task,
+    );
+  });
+
+  it('round-trips double-quoted approved execution tasks without applying JSON escapes', () => {
+    const task = String.raw`Use C:\tmp and keep \n literal plus "quotes"`;
+    assert.equal(
+      decodeApprovedExecutionQuotedValue(encodeApprovedExecutionTask(task, 'double')),
+      task,
+    );
+    const literalEscapeTask = String.raw`Keep \t and \u1234 literal`;
+    assert.equal(
+      decodeApprovedExecutionQuotedValue(encodeApprovedExecutionTask(literalEscapeTask, 'double')),
+      literalEscapeTask,
+    );
+  });
 
   it('requires both PRD and test spec for planning completion', async () => {
     const plansDir = join(tempDir, '.omx', 'plans');

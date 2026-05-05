@@ -51,17 +51,22 @@ The only normal terminal state is `complete` after a clean code review. Cancella
 
 <Pre-context Intake>
 Before Phase `ralplan` starts or resumes:
-1. Derive a task slug from the request.
-2. Reuse the latest relevant `.omx/context/{slug}-*.md` snapshot when available.
-3. If none exists, create `.omx/context/{slug}-{timestamp}.md` (UTC `YYYYMMDDTHHMMSSZ`) with:
-   - task statement
-   - desired outcome
-   - known facts/evidence
-   - constraints
-   - unknowns/open questions
-   - likely codebase touchpoints
-4. If ambiguity remains high, run `explore` first for brownfield facts, then run the Socratic `$deep-interview --quick <task>` before `$ralplan`.
-5. Carry the snapshot path in Autopilot state and all handoff artifacts.
+1. When Autopilot resumes from an approved implementation handoff, load the
+   canonical pack `.omx/context/context-<timestamp>-<slug>.json` plus its
+   generated index and refs before widening scope.
+2. Use the generated `build` refs as the default implementation brief, keep
+   the generated `verify` refs as the proof checklist, and open `scope` refs
+   only when boundaries or guardrails become unclear.
+3. On direct start without an approved implementation handoff, gather the
+   minimum task facts inline and keep `context_pack_path: null` until planning
+   produces a canonical handoff.
+4. If ambiguity remains high, run `explore` first for brownfield facts, then
+   run the Socratic `$deep-interview --quick <task>` before `$ralplan`.
+5. Do not create an ad hoc `.omx/context/*.md` snapshot beside the canonical
+   pack; let planning create or repair the typed pack through the normal
+   lifecycle.
+6. Carry the current `context_pack_path` in Autopilot state and later handoff
+   artifacts.
 </Pre-context Intake>
 
 <Execution_Policy>
@@ -89,17 +94,22 @@ Required fields:
   "max_iterations": 10,
   "phase_cycle": ["ralplan", "ralph", "code-review"],
   "handoff_artifacts": {
-    "context_snapshot_path": ".omx/context/<slug>-<timestamp>.md",
     "ralplan": null,
     "ralph": null,
     "code_review": null
   },
   "review_verdict": null,
-  "return_to_ralplan_reason": null
+  "return_to_ralplan_reason": null,
+  "state": {
+    "context_pack_path": null
+  }
 }
 ```
 
-- **On start**: `state_write({mode:"autopilot", active:true, current_phase:"ralplan", iteration:1, review_cycle:0, state:{phase_cycle:["ralplan","ralph","code-review"], handoff_artifacts:{context_snapshot_path, ralplan:null, ralph:null, code_review:null}, review_verdict:null, return_to_ralplan_reason:null}})`
+- **On start from an approved implementation handoff**:
+  `state_write({mode:"autopilot", active:true, current_phase:"ralplan", iteration:1, review_cycle:0, state:{context_pack_path:".omx/context/context-<timestamp>-<slug>.json", phase_cycle:["ralplan","ralph","code-review"], handoff_artifacts:{ralplan:null, ralph:null, code_review:null}, review_verdict:null, return_to_ralplan_reason:null}})`
+- **On direct start without an approved implementation handoff**:
+  `state_write({mode:"autopilot", active:true, current_phase:"ralplan", iteration:1, review_cycle:0, state:{context_pack_path:null, phase_cycle:["ralplan","ralph","code-review"], handoff_artifacts:{ralplan:null, ralph:null, code_review:null}, review_verdict:null, return_to_ralplan_reason:null}})`
 - **On ralplan -> ralph**: set `current_phase:"ralph"`, persist the plan/test-spec paths under `handoff_artifacts.ralplan`.
 - **On ralph -> code-review**: set `current_phase:"code-review"`, persist implementation/test evidence under `handoff_artifacts.ralph`.
 - **On clean review**: set `active:false`, `current_phase:"complete"`, persist `review_verdict:{recommendation:"APPROVE", architectural_status:"CLEAR", clean:true}` and `completed_at`.

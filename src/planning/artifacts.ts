@@ -195,20 +195,16 @@ export function hasRequiredContextPacks(
   return selection.contextPackStatus === 'ready';
 }
 
-function decodeQuotedValue(raw: string): string | null {
+export function decodeApprovedExecutionQuotedValue(raw: string): string | null {
   const normalized = raw.trim();
   if (!normalized) return null;
-  try {
-    return JSON.parse(normalized) as string;
-  } catch {
-    if (
-      (normalized.startsWith('"') && normalized.endsWith('"'))
-      || (normalized.startsWith("'") && normalized.endsWith("'"))
-    ) {
-      return normalized.slice(1, -1);
-    }
-    return null;
+  if (normalized.startsWith('"') && normalized.endsWith('"')) {
+    return normalized.slice(1, -1).replace(/\\"/g, '"');
   }
+  if (normalized.startsWith("'") && normalized.endsWith("'")) {
+    return normalized.slice(1, -1).replace(/\\'/g, "'");
+  }
+  return null;
 }
 
 function orderedPrdPathsNewestFirst(paths: readonly string[]): string[] {
@@ -510,7 +506,7 @@ function selectLaunchHintMatch(
       if (!rawTask) {
         return [];
       }
-      const task = decodeQuotedValue(rawTask);
+      const task = decodeApprovedExecutionQuotedValue(rawTask);
       if (!task) {
         return [];
       }
@@ -534,7 +530,7 @@ function selectLaunchHintMatch(
       if (!rawTask) {
         return [];
       }
-      const task = decodeQuotedValue(rawTask);
+      const task = decodeApprovedExecutionQuotedValue(rawTask);
       if (!task) {
         return [];
       }
@@ -557,7 +553,7 @@ function selectLaunchHintMatch(
     if (!rawTask) {
       return [];
     }
-    const task = decodeQuotedValue(rawTask);
+    const task = decodeApprovedExecutionQuotedValue(rawTask);
     if (!task || task.trim() !== normalizedTask) {
       return [];
     }

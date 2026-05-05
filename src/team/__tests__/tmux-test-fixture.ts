@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,6 +27,71 @@ export interface TempTmuxSessionOptions {
   useAmbientServer?: boolean;
 }
 
+function resolveTmuxCommand(): string {
+  const directCandidates = [
+    '/opt/homebrew/bin/tmux',
+    '/usr/local/bin/tmux',
+    '/usr/bin/tmux',
+    '/bin/tmux',
+  ];
+  for (const candidate of directCandidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+
+  const baselinePath = [
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    '/usr/bin',
+    '/bin',
+    '/usr/sbin',
+    '/sbin',
+  ].join(':');
+  const result = spawnSync('which', ['tmux'], {
+    encoding: 'utf-8',
+    env: { ...process.env, PATH: baselinePath },
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  const resolved = (result.stdout || '').trim();
+  return result.status === 0 && resolved ? resolved : 'tmux';
+}
+
+const BASELINE_PATH = [
+  '/opt/homebrew/bin',
+  '/usr/local/bin',
+  '/usr/bin',
+  '/bin',
+  '/usr/sbin',
+  '/sbin',
+].join(':');
+
+export const REAL_TMUX_COMMAND = resolveTmuxCommand();
+
+function buildTmuxEnv(
+  source: NodeJS.ProcessEnv,
+  { ignoreTmuxEnv = false }: { ignoreTmuxEnv?: boolean } = {},
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    PATH: BASELINE_PATH,
+    HOME: source.HOME,
+    USER: source.USER,
+    LOGNAME: source.LOGNAME,
+    SHELL: source.SHELL,
+    TMPDIR: source.TMPDIR,
+    TERM: source.TERM,
+    LANG: source.LANG,
+    LC_ALL: source.LC_ALL,
+    LC_CTYPE: source.LC_CTYPE,
+    LC_MESSAGES: source.LC_MESSAGES,
+  };
+  if (!ignoreTmuxEnv) {
+    env.TMUX = source.TMUX;
+    env.TMUX_PANE = source.TMUX_PANE;
+  }
+  return Object.fromEntries(
+    Object.entries(env).filter(([, value]) => typeof value === 'string' && value.length > 0),
+  );
+}
+
 function snapshotTmuxEnv(source: NodeJS.ProcessEnv = process.env): TmuxEnvSnapshot {
   return {
     TMUX: typeof source.TMUX === 'string' ? source.TMUX : undefined,
@@ -45,10 +111,10 @@ function runTmux(
   args: string[],
   options: { ignoreTmuxEnv?: boolean; env?: NodeJS.ProcessEnv; serverName?: string } = {},
 ): string {
-  const env = options.env
-    ?? (options.ignoreTmuxEnv ? { ...process.env, TMUX: undefined, TMUX_PANE: undefined } : process.env);
+  const sourceEnv = options.env ?? process.env;
+  const env = buildTmuxEnv(sourceEnv, { ignoreTmuxEnv: options.ignoreTmuxEnv });
   const argv = options.serverName ? ['-L', options.serverName, ...args] : args;
-  const result = spawnSync('tmux', argv, {
+  const result = spawnSync(REAL_TMUX_COMMAND, argv, {
     encoding: 'utf-8',
     env,
     stdio: ['ignore', 'pipe', 'pipe'],

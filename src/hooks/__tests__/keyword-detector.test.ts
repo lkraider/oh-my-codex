@@ -202,6 +202,22 @@ describe('keyword detector swarm/team compatibility', () => {
     assert.equal(match.keyword.toLowerCase(), '$analyze');
   });
 
+  it('maps explicit $ultragoal invocation to ultragoal workflow skill', () => {
+    const match = detectPrimaryKeyword('$ultragoal split this release into durable goals');
+    assert.ok(match);
+    assert.equal(match.skill, 'ultragoal');
+    assert.equal(match.keyword.toLowerCase(), '$ultragoal');
+  });
+
+  it('maps intentful ultragoal prose without triggering artifact path mentions', () => {
+    const intentful = detectPrimaryKeyword('please run ultragoal workflow for this launch');
+    assert.ok(intentful);
+    assert.equal(intentful.skill, 'ultragoal');
+
+    const pathOnly = detectPrimaryKeyword('inspect .omx/ultragoal/goals.json');
+    assert.notEqual(pathOnly?.skill, 'ultragoal');
+  });
+
   it('maps code-review keyword variants to code-review skill', () => {
     const hyphen = detectPrimaryKeyword('run $code-review before merge');
     assert.ok(hyphen);
@@ -456,6 +472,8 @@ describe('keyword registry coverage', () => {
     assert.ok(registryKeywords.has('wiki add'));
     assert.ok(registryKeywords.has('wiki lint'));
     assert.ok(registryKeywords.has('$autoresearch'));
+    assert.ok(registryKeywords.has('$ultragoal'));
+    assert.ok(registryKeywords.has('ultragoal'));
   });
 });
 
@@ -1413,6 +1431,27 @@ describe('keyword detector skill-active-state lifecycle', () => {
     }
   });
 
+  it('records ultragoal as a prompt skill without seeding unrelated mode state', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-keyword-state-ultragoal-'));
+    const stateDir = join(cwd, '.omx', 'state');
+    try {
+      await mkdir(stateDir, { recursive: true });
+      const result = await recordSkillActivation({
+        stateDir,
+        text: '$ultragoal split this launch into durable goals',
+      });
+
+      assert.ok(result);
+      assert.equal(result.skill, 'ultragoal');
+      assert.equal(result.keyword, '$ultragoal');
+      assert.equal(result.initialized_mode, undefined);
+      assert.equal(result.initialized_state_path, undefined);
+      assert.equal(existsSync(join(stateDir, 'ultragoal-state.json')), false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('emits a warning when skill-active-state persistence fails', async () => {
     const warnings: unknown[][] = [];
     mock.method(console, 'warn', (...args: unknown[]) => {
@@ -2230,12 +2269,12 @@ describe('applyRalplanGate', () => {
         join(stateDir, 'team-state.json'),
         `${JSON.stringify({
           active: true,
-          team_name: 'bound-team-root-malformed-fallback',
+          team_name: 'bound-root-malformed',
           task_description: approvedTask,
           agent_count: 7,
         }, null, 2)}\n`,
       );
-      await writePersistedApprovedTeamExecutionBinding('bound-team-root-malformed-fallback', cwd, {
+      await writePersistedApprovedTeamExecutionBinding('bound-root-malformed', cwd, {
         prd_path: prdPath,
         task: approvedTask,
       });

@@ -55,6 +55,7 @@ interface ParsedTeamArgs {
   explicitWorkerCount: boolean;
   task: string;
   teamName: string;
+  displayName?: string;
   followupState: TeamCliFollowupState;
   allowRepoAwareDagHandoff: boolean;
   approvedRepositoryContextSummary?: ApprovedRepositoryContextSummary;
@@ -885,6 +886,7 @@ function parseTeamArgs(args: string[], cwd: string = process.cwd()): ParsedTeamA
     explicitWorkerCount,
     task: effectiveTask,
     teamName,
+    displayName: teamName,
     followupState: followupContext?.followupState ?? { status: 'generic' },
     allowRepoAwareDagHandoff,
     ...(approvedRepositoryContextSummary ? { approvedRepositoryContextSummary } : {}),
@@ -1211,6 +1213,7 @@ async function ensureTeamModeState(
       task_description: parsed.task,
       current_phase: currentPhase,
       team_name: parsed.teamName,
+      display_name: parsed.displayName ?? parsed.teamName,
       ...(effectiveTeamStateRoot ? { team_state_root: effectiveTeamStateRoot } : {}),
       agent_count: parsed.workerCount,
       agent_types: roleDistribution,
@@ -1228,6 +1231,7 @@ async function ensureTeamModeState(
     active,
     current_phase: currentPhase,
     team_name: parsed.teamName,
+    display_name: parsed.displayName ?? parsed.teamName,
     ...(effectiveTeamStateRoot ? { team_state_root: effectiveTeamStateRoot } : {}),
     agent_count: parsed.workerCount,
     agent_types: roleDistribution,
@@ -1580,7 +1584,7 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
   if (subcommand === 'resume') {
     const name = teamArgs[1];
     if (!name) throw new Error('Usage: omx team resume <team-name>');
-    const runtime = await resumeTeam(name, cwd);
+    const runtime = await resumeTeam(name, cwd, { allowApprovedExecutionFallback: true });
     if (!runtime) {
       console.log(`No resumable team found for ${name}`);
       return;
@@ -1592,6 +1596,7 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
       explicitAgentType: false,
       explicitWorkerCount: false,
       teamName: runtime.teamName,
+      displayName: runtime.config.display_name ?? runtime.config.requested_name ?? runtime.teamName,
       followupState: { status: 'generic' },
       allowRepoAwareDagHandoff: false,
     }, undefined, undefined, runtime.config.team_state_root);
@@ -1679,6 +1684,15 @@ export async function teamCommand(args: string[], _options: TeamCliOptions = {})
     cwd,
     runtime.config.team_state_root,
   );
-  await ensureTeamModeState(effectiveParsed, tasks, persistedApprovedHint ?? approvedHint, runtime.config.team_state_root);
+  await ensureTeamModeState(
+    {
+      ...effectiveParsed,
+      teamName: runtime.teamName,
+      displayName: runtime.config.display_name ?? effectiveParsed.displayName ?? effectiveParsed.teamName,
+    },
+    tasks,
+    persistedApprovedHint ?? approvedHint,
+    runtime.config.team_state_root,
+  );
   await renderStartSummary(runtime, staffingPlan);
 }

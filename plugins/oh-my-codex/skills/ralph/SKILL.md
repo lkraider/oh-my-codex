@@ -89,10 +89,26 @@ Complex tasks often fail silently: partial implementations get declared "done", 
 - Skip Codex consultation for simple feature additions, well-tested changes, or time-critical verification
 - If ToolSearch finds no MCP tools or Codex is unavailable, proceed with architect agent verification alone -- never block on external tools
 - Use `state_write` / `state_read` for ralph mode state persistence between iterations
+- Use Codex goal tools when present: `get_goal` to discover or re-check the active objective, `create_goal` only when the user/system explicitly requested a new goal and no active goal exists, and `update_goal` only after the audited objective is fully achieved.
 - Persist approved context pack path in Ralph mode state when execution starts from an approved handoff so later phases and agents share the same grounding context
 - Persist context snapshot path in Ralph mode state so later phases and agents share the same grounding context
 - If an `omx_state` MCP tool call reports that its stdio transport is unavailable/closed, do **not** retry the same MCP call. Retry once through the supported CLI parity surface with the same payload, preserving `workingDirectory` and `session_id`: `omx state write --input '<json>' --json`, `omx state read --input '<json>' --json`, or `omx state clear --input '<json>' --json`. If the CLI path also fails, continue with `.omx/context` / `.omx/plans` file-backed artifacts and report the state persistence blocker.
 </Tool_Usage>
+
+## Goal Mode Integration
+
+Codex goal mode is the thread-level completion contract for long-running Ralph work. Ralph state tracks workflow mechanics; goal mode tracks whether the user objective is truly done. When the goal tools are available:
+
+1. Call `get_goal` during intake or before the first execution loop when the prompt/hook says an active thread goal exists.
+2. If no goal exists, call `create_goal` only when the user or system explicitly asked for goal tracking; otherwise continue with Ralph state alone.
+3. Treat `goal.objective` as the top-level completion contract. Newer user updates can refine the current branch, but do not silently narrow the goal.
+4. Before completion, perform a prompt-to-artifact checklist and completion audit against real evidence:
+   - restate the objective as deliverables/success criteria
+   - map every prompt requirement, named workflow (`$ralplan`, `$ralph`), file, command, test, gate, and deliverable to evidence
+   - inspect the actual files, command output, state, and tests behind each checklist item
+   - identify missing, weakly verified, or uncovered requirements and continue if any remain
+5. Call `update_goal({status: "complete"})` only when the audit shows no required work remains. Do not use passing tests, Ralph state, or architect approval as proxy proof unless they cover the whole goal.
+6. If goal tools are unavailable, keep working through Ralph state and mention the missing goal-mode evidence in the final report.
 
 ## State Management
 

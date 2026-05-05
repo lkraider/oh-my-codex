@@ -76,6 +76,7 @@ async function assertProjectPluginModeArtifacts(wd: string): Promise<void> {
 	assert.match(hooks, /codex-native-hook\.js/);
 	const config = await readFile(join(wd, ".codex", "config.toml"), "utf-8");
 	assert.match(config, /^codex_hooks = true$/m);
+	assert.match(config, /^goals = true$/m);
 	assert.doesNotMatch(config, /developer_instructions|notify-hook|mcp_servers/);
 	assert.equal(
 		existsSync(join(wd, ".codex", "skills", "help", "SKILL.md")),
@@ -674,11 +675,12 @@ describe("omx setup install mode behavior", () => {
 					const config = await readFile(
 						join(codexHomeDir, "config.toml"),
 						"utf-8",
-					);
-					assert.match(config, /^codex_hooks = true$/m);
-					assert.doesNotMatch(
-						config,
-						/developer_instructions|notify-hook|mcp_servers/,
+						);
+						assert.match(config, /^codex_hooks = true$/m);
+						assert.match(config, /^goals = true$/m);
+						assert.doesNotMatch(
+							config,
+							/developer_instructions|notify-hook|mcp_servers/,
 					);
 					assert.equal(
 						existsSync(join(codexHomeDir, "skills", "help", "SKILL.md")),
@@ -735,6 +737,17 @@ describe("omx setup install mode behavior", () => {
 						"utf-8",
 					);
 					assert.match(config, /developer_instructions\s*=/);
+					assert.match(
+						config,
+						/Registered Codex plugin marketplace surfaces supply OMX workflows, prompts, and native-agent roles/,
+					);
+					assert.match(config, /User-installed skills may still live under ~\/.codex\/skills/);
+					assert.match(
+						config,
+						/Setup-owned prompt files and native-agent TOML defaults are intentionally omitted unless explicitly installed/,
+					);
+					assert.doesNotMatch(config, /Native subagents live in \.codex\/agents/);
+					assert.doesNotMatch(config, /Treat installed prompts as narrower execution surfaces/);
 					assert.match(config, /^codex_hooks = true$/m);
 					assert.doesNotMatch(config, /notify-hook|mcp_servers/);
 
@@ -757,8 +770,46 @@ describe("omx setup install mode behavior", () => {
 					);
 					assert.match(
 						agentsMd,
-						/Treat installed prompts as narrower execution surfaces under AGENTS\.md authority|Role prompts under `prompts\/\*\.md` are narrower execution surfaces/,
+						/Registered Codex plugin marketplace surfaces supply OMX workflows, prompts, and native-agent roles/,
 					);
+					assert.match(agentsMd, /User-installed skills may still live under `~\/.codex\/skills`/);
+					assert.match(
+						agentsMd,
+						/Setup-owned prompt files and native-agent TOML defaults are intentionally omitted in plugin mode unless explicitly installed/,
+					);
+					assert.doesNotMatch(agentsMd, /Role prompts under `prompts\/\*\.md`/);
+					assert.doesNotMatch(agentsMd, /load the installed prompt\/skill\/agent surfaces from/);
+				});
+			});
+		} finally {
+			await rm(wd, { recursive: true, force: true });
+		}
+	});
+
+	it("uses project-scoped plugin AGENTS.md wording without legacy prompt or agent paths", async () => {
+		const wd = await mkdtemp(join(tmpdir(), "omx-setup-install-mode-"));
+		try {
+			await withIsolatedUserHome(wd, async () => {
+				await withTempCwd(wd, async () => {
+					await setup({
+						scope: "project",
+						installMode: "plugin",
+						pluginAgentsMdPrompt: async () => true,
+						pluginDeveloperInstructionsPrompt: async () => false,
+					});
+
+					const agentsMd = await readFile(join(wd, "AGENTS.md"), "utf-8");
+					assert.match(
+						agentsMd,
+						/Registered Codex plugin marketplace surfaces supply OMX workflows, prompts, and native-agent roles/,
+					);
+					assert.match(
+						agentsMd,
+						/User-installed skills may still live under `\.\/.codex\/skills` for project scope, or `~\/.codex\/skills` for user-installed skills/,
+					);
+					assert.doesNotMatch(agentsMd, /`~\/.codex\/prompts`/);
+					assert.doesNotMatch(agentsMd, /`~\/.codex\/agents`/);
+					assert.doesNotMatch(agentsMd, /Role prompts under `prompts\/\*\.md`/);
 				});
 			});
 		} finally {
@@ -997,6 +1048,10 @@ describe("omx setup install mode behavior", () => {
 						await setup({ scope: "project", installMode: "plugin" });
 					});
 					assert.match(pluginOutput, /Using setup install mode: plugin/);
+					assert.match(
+						pluginOutput,
+						/Native Codex hooks and runtime feature flags refresh complete .*codex_hooks, goals/,
+					);
 					assert.doesNotMatch(pluginOutput, /user-scope skill delivery mode/);
 					assert.doesNotMatch(
 						pluginOutput,

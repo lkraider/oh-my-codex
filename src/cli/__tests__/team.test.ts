@@ -11,7 +11,9 @@ import { buildLeaderMonitoringHints, parseTeamStartArgs, teamCommand } from '../
 import { readModeState } from '../../modes/base.js';
 import { DEFAULT_MAX_WORKERS } from '../../team/state.js';
 import { readContextPackDocument, writeContextPackDocument } from '../../planning/context-packs.js';
+import { readApprovedExecutionLaunchHint } from '../../planning/artifacts.js';
 import {
+  buildApprovedTeamExecutionBinding,
   readPersistedApprovedTeamExecutionBinding,
   writePersistedApprovedTeamExecutionBinding,
 } from '../../team/approved-execution.js';
@@ -27,11 +29,22 @@ import {
   writeTaskApproval,
   writeWorkerStatus,
 } from '../../team/state.js';
-import { isRealTmuxAvailable, withTempTmuxSession, type TempTmuxSessionFixture } from '../../team/__tests__/tmux-test-fixture.js';
+import {
+  isRealTmuxAvailable,
+  REAL_TMUX_COMMAND,
+  withTempTmuxSession,
+  type TempTmuxSessionFixture,
+} from '../../team/__tests__/tmux-test-fixture.js';
 
 const OMX_CLI_PATH = fileURLToPath(new URL('../omx.js', import.meta.url));
 const ORIGINAL_OMX_TEAM_WORKER = process.env.OMX_TEAM_WORKER;
 const ORIGINAL_OMX_TEAM_STATE_ROOT = process.env.OMX_TEAM_STATE_ROOT;
+
+function encodeApprovedExecutionTask(task: string, quote: 'single' | 'double'): string {
+  return quote === 'single'
+    ? `'${task.replace(/'/g, "\\'")}'`
+    : `"${task.replace(/"/g, '\\"')}"`;
+}
 
 beforeEach(() => {
   delete process.env.OMX_TEAM_WORKER;
@@ -209,7 +222,7 @@ function skipUnlessTmux(t: TestContext): void {
 }
 
 function runFixtureTmux(fixture: TempTmuxSessionFixture, args: string[]): string {
-  return execFileSync('tmux', args, {
+  return execFileSync(REAL_TMUX_COMMAND, args, {
     encoding: 'utf-8',
     env: {
       ...process.env,
@@ -530,6 +543,53 @@ describe('parseTeamStartArgs', () => {
     }
   });
 
+  it('round-trips double-quoted approved follow-ups from launch hint encoding through persisted binding', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-team-followup-bound-double-quoted-'));
+    const previousCwd = process.cwd();
+    try {
+      process.chdir(wd);
+      const plansDir = join(wd, '.omx', 'plans');
+      await mkdir(plansDir, { recursive: true });
+      const boundTask = String.raw`Use C:\tmp and keep \n literal plus "quotes"`;
+      const boundCommand = `omx team 2:executor ${encodeApprovedExecutionTask(boundTask, 'double')}`;
+      await writeFile(
+        join(plansDir, 'prd-issue-831-double-quoted.md'),
+        `# Approved plan\n\nLaunch via ${boundCommand}\n`,
+      );
+      await writeFile(join(plansDir, 'test-spec-issue-831-double-quoted.md'), '# Test spec\n');
+      await mkdir(join(wd, '.omx', 'state'), { recursive: true });
+      await writeFile(
+        join(wd, '.omx', 'state', 'team-state.json'),
+        JSON.stringify({ active: true, team_name: 'bound-team-double-quoted' }, null, 2),
+      );
+      const approvedHint = readApprovedExecutionLaunchHint(wd, 'team');
+      assert.ok(approvedHint);
+      assert.equal(approvedHint?.task, boundTask);
+      assert.equal(approvedHint?.command, boundCommand);
+      await writePersistedApprovedTeamExecutionBinding(
+        'bound-team-double-quoted',
+        wd,
+        buildApprovedTeamExecutionBinding(approvedHint),
+      );
+
+      const result = parseTeamStartArgs(['team']);
+      assert.equal(result.parsed.task, boundTask);
+      assert.equal(result.parsed.workerCount, 2);
+      assert.equal(result.parsed.agentType, 'executor');
+      const persistedBinding = await readPersistedApprovedTeamExecutionBinding('bound-team-double-quoted', wd);
+      assert.equal(persistedBinding?.task, boundTask);
+      assert.equal(persistedBinding?.command, boundCommand);
+      const followupState = result.parsed.followupState;
+      assert.equal(followupState.status, 'rejected-bound');
+      if (followupState.status !== 'rejected-bound') {
+        throw new Error('expected rejected-bound followup state');
+      }
+    } finally {
+      process.chdir(previousCwd);
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
   it('reuses the bound approved team handoff from session-scoped team state for a short follow-up', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-team-followup-bound-session-'));
     const previousCwd = process.cwd();
@@ -684,12 +744,12 @@ describe('parseTeamStartArgs', () => {
         join(wd, '.omx', 'state', 'team-state.json'),
         `${JSON.stringify({
           active: true,
-          team_name: 'bound-team-root-malformed-fallback',
+          team_name: 'bound-root-malformed',
           task_description: approvedTask,
           agent_count: 7,
         }, null, 2)}\n`,
       );
-      await writePersistedApprovedTeamExecutionBinding('bound-team-root-malformed-fallback', wd, {
+      await writePersistedApprovedTeamExecutionBinding('bound-root-malformed', wd, {
         prd_path: prdPath,
         task: approvedTask,
       });
@@ -768,12 +828,12 @@ describe('parseTeamStartArgs', () => {
         join(wd, '.omx', 'state', 'team-state.json'),
         `${JSON.stringify({
           active: true,
-          team_name: 'bound-team-root-incomplete-fallback',
+          team_name: 'bound-root-incomplete',
           task_description: approvedTask,
           agent_count: 6,
         }, null, 2)}\n`,
       );
-      await writePersistedApprovedTeamExecutionBinding('bound-team-root-incomplete-fallback', wd, {
+      await writePersistedApprovedTeamExecutionBinding('bound-root-incomplete', wd, {
         prd_path: prdPath,
         task: approvedTask,
       });
@@ -3441,12 +3501,14 @@ process.on('SIGTERM', () => process.exit(0));
 
       await withMockPromptModeCodexAllowed(() =>
         withoutTeamTestWorkerEnv(() => teamCommand(['1:executor', teamTask])));
+      const startedState = await readModeState('team', wd);
+      const runtimeTeamName = String(startedState?.team_name ?? teamName);
 
       let statusOutput = '';
       for (let attempt = 0; attempt < 50; attempt += 1) {
         logs.length = 0;
         stderr.length = 0;
-        await withoutTeamTestWorkerEnv(() => teamCommand(['status', teamName]));
+        await withoutTeamTestWorkerEnv(() => teamCommand(['status', runtimeTeamName]));
         statusOutput = logs.join('\n');
         if (/phase=failed/.test(statusOutput)) break;
         await new Promise((resolve) => setTimeout(resolve, 20));
@@ -3455,13 +3517,13 @@ process.on('SIGTERM', () => process.exit(0));
       assert.doesNotMatch(stderr.join('\n'), /ESRCH/);
 
       logs.length = 0;
-      await withoutTeamTestWorkerEnv(() => teamCommand(['await', teamName, '--json', '--timeout-ms', '250']));
+      await withoutTeamTestWorkerEnv(() => teamCommand(['await', runtimeTeamName, '--json', '--timeout-ms', '250']));
       const payload = JSON.parse(logs.at(-1) ?? '{}') as {
         team_name?: string;
         status?: string;
         event?: { type?: string; worker?: string; reason?: string | null } | null;
       };
-      assert.equal(payload.team_name, teamName);
+      assert.equal(payload.team_name, runtimeTeamName);
       assert.equal(payload.status, 'event');
       assert.equal(payload.event?.type, 'worker_stopped');
       assert.equal(payload.event?.worker, 'worker-1');
@@ -3515,18 +3577,20 @@ process.on('SIGTERM', () => process.exit(0));
         withoutTeamTestWorkerEnv(() => teamCommand(['1:executor', teamTask])));
 
       const startedState = await readModeState('team', wd);
+      const runtimeTeamName = String(startedState?.team_name ?? teamName);
       assert.equal(startedState?.active, true);
-      assert.equal(startedState?.team_name, teamName);
+      assert.equal(startedState?.team_name, runtimeTeamName);
+      assert.equal(startedState?.display_name, teamName);
       assert.equal(startedState?.current_phase, 'team-exec');
 
       await rm(join(wd, '.omx', 'state', 'team-state.json'), { force: true });
       assert.equal(await readModeState('team', wd), null);
 
-      await withoutTeamTestWorkerEnv(() => teamCommand(['resume', teamName]));
+      await withoutTeamTestWorkerEnv(() => teamCommand(['resume', runtimeTeamName]));
 
       const resumedState = await readModeState('team', wd);
       assert.equal(resumedState?.active, true);
-      assert.equal(resumedState?.team_name, teamName);
+      assert.equal(resumedState?.team_name, runtimeTeamName);
       assert.equal(resumedState?.current_phase, 'team-exec');
     } finally {
       process.chdir(previousCwd);
@@ -3753,8 +3817,10 @@ process.on('SIGTERM', () => process.exit(0));
 
       await withMockPromptModeCodexAllowed(() =>
         withoutTeamTestWorkerEnv(() => teamCommand(['1:executor', teamTask])));
+      const startedState = await readModeState('team', wd);
+      const runtimeTeamName = String(startedState?.team_name ?? teamName);
       await writeFile(
-        join(wd, '.omx', 'state', 'team', teamName, 'phase.json'),
+        join(wd, '.omx', 'state', 'team', runtimeTeamName, 'phase.json'),
         JSON.stringify({
           current_phase: 'complete',
           max_fix_attempts: 3,
@@ -3765,11 +3831,11 @@ process.on('SIGTERM', () => process.exit(0));
       );
       await rm(join(wd, '.omx', 'state', 'team-state.json'), { force: true });
 
-      await withoutTeamTestWorkerEnv(() => teamCommand(['resume', teamName]));
+      await withoutTeamTestWorkerEnv(() => teamCommand(['resume', runtimeTeamName]));
 
       const resumedState = await readModeState('team', wd);
       assert.equal(resumedState?.active, false);
-      assert.equal(resumedState?.team_name, teamName);
+      assert.equal(resumedState?.team_name, runtimeTeamName);
       assert.equal(resumedState?.current_phase, 'complete');
     } finally {
       process.chdir(previousCwd);

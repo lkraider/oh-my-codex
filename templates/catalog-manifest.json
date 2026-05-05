@@ -53,10 +53,31 @@
       "internalRequired": false
     },
     {
+      "name": "autoresearch-goal",
+      "category": "execution",
+      "status": "active",
+      "core": false,
+      "internalRequired": false
+    },
+    {
+      "name": "performance-goal",
+      "category": "execution",
+      "status": "active",
+      "core": false,
+      "internalRequired": false
+    },
+    {
       "name": "pipeline",
       "category": "execution",
       "status": "active",
       "core": false,
+      "internalRequired": false
+    },
+    {
+      "name": "ultragoal",
+      "category": "execution",
+      "status": "active",
+      "core": true,
       "internalRequired": false
     },
     {

@@ -43,10 +43,28 @@
       "status": "active"
     },
     {
+      "name": "autoresearch-goal",
+      "category": "execution",
+      "status": "active",
+      "core": false
+    },
+    {
+      "name": "performance-goal",
+      "category": "execution",
+      "status": "active",
+      "core": false
+    },
+    {
       "name": "pipeline",
       "category": "execution",
       "status": "active",
       "core": false
+    },
+    {
+      "name": "ultragoal",
+      "category": "execution",
+      "status": "active",
+      "core": true
     },
     {
       "name": "swarm",

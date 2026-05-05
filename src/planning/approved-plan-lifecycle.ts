@@ -30,7 +30,7 @@ import {
   type ContextPackExecutionRef,
   type ContextPackRole,
 } from './context-packs.js';
-import { omxPlansDir } from '../utils/paths.js';
+import { omxPlansDir, sameFilePath } from '../utils/paths.js';
 
 const PRD_PATTERN = /^prd-.*\.md$/i;
 const TEST_SPEC_PATTERN = /^test-?spec-.*\.md$/i;
@@ -200,26 +200,32 @@ function resolvePlanningArtifactPrdIdentity(
   const repoRoot = dirname(dirname(artifacts.plansDir));
   if (isAbsolute(prdPath)) {
     const resolvedPath = resolve(prdPath);
-    const matchedArtifact = artifacts.prdPaths.find((candidatePath) => {
-      try {
-        return realpathSync.native(candidatePath) === realpathSync.native(resolvedPath);
-      } catch {
-        return resolve(candidatePath) === resolvedPath;
-      }
-    });
+    const matchedArtifact = artifacts.prdPaths.find((candidatePath) => sameFilePath(candidatePath, resolvedPath));
     return matchedArtifact
       ? { canonicalPath: matchedArtifact, persistedPath: resolvedPath }
       : null;
   }
 
   const normalizedPath = normalizePlanningRepoRelativePath(prdPath);
-  const matchedArtifact = artifacts.prdPaths.find((candidatePath) => {
+  const lexicalMatch = artifacts.prdPaths.find((candidatePath) => {
     const repoRelativePath = normalizePlanningRepoRelativePath(relative(repoRoot, candidatePath));
     const plansRelativePath = normalizePlanningRepoRelativePath(relative(artifacts.plansDir, candidatePath));
     return normalizedPath === repoRelativePath || normalizedPath === plansRelativePath;
   });
+  if (lexicalMatch) {
+    return {
+      canonicalPath: lexicalMatch,
+      persistedPath: lexicalMatch,
+    };
+  }
+
+  const resolvedPath = resolve(repoRoot, prdPath);
+  const matchedArtifact = artifacts.prdPaths.find((candidatePath) => sameFilePath(candidatePath, resolvedPath));
   return matchedArtifact
-    ? { canonicalPath: matchedArtifact, persistedPath: matchedArtifact }
+    ? {
+      canonicalPath: matchedArtifact,
+      persistedPath: resolvedPath,
+    }
     : null;
 }
 

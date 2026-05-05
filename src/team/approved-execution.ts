@@ -9,12 +9,15 @@ import {
   type ContextPackExecutionRef,
 } from '../planning/context-packs.js';
 import {
-  isApprovedExecutionContextReadyStatus,
+  isApprovedExecutionFollowupReadyStatus,
   readApprovedExecutionLaunchHint,
+  readPlanningArtifacts,
   type ApprovedExecutionLaunchHint,
 } from '../planning/artifacts.js';
+import { TEAM_NAME_SAFE_PATTERN } from './contracts.js';
 import { resolveCanonicalTeamStateRoot } from './state-root.js';
 import { getReadScopedStatePathsSync } from '../mcp/state-paths.js';
+import { sameFilePath } from '../utils/paths.js';
 
 export interface ApprovedTeamExecutionBinding {
   prd_path: string;
@@ -57,7 +60,7 @@ export type PersistedApprovedTeamExecutionContinuityState =
   | { status: 'valid'; binding: ApprovedTeamExecutionBinding; approvedHint: ApprovedExecutionLaunchHint };
 
 export function normalizeApprovedTeamExecutionBinding(value: unknown): ApprovedTeamExecutionBinding | null {
-  if (!value || typeof value !== 'object') {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return null;
   }
   const binding = value as Record<string, unknown>;
@@ -85,8 +88,14 @@ export function buildApprovedTeamExecutionBinding(
   return {
     prd_path: approvedHint.sourcePath,
     task: approvedHint.task,
-    command: approvedHint.command,
+    ...(approvedHint.command ? { command: approvedHint.command } : {}),
   };
+}
+
+function assertSafeTeamName(teamName: string): void {
+  if (!TEAM_NAME_SAFE_PATTERN.test(teamName)) {
+    throw new Error(`invalid_team_name:${teamName}`);
+  }
 }
 
 function approvedTeamExecutionBindingPath(
@@ -94,6 +103,7 @@ function approvedTeamExecutionBindingPath(
   cwd: string,
   teamStateRoot?: string | null,
 ): string {
+  assertSafeTeamName(teamName);
   const stateRoot = resolve(teamStateRoot ?? resolveCanonicalTeamStateRoot(cwd));
   return join(stateRoot, 'team', teamName, 'approved-execution.json');
 }
@@ -207,7 +217,7 @@ export async function resolvePersistedApprovedTeamExecutionContinuityState(
       binding: bindingState.binding,
     };
   }
-  if (!isApprovedExecutionContextReadyStatus(approvedHint.contextPackStatus)) {
+  if (!isApprovedExecutionFollowupReadyStatus(approvedHint.contextPackStatus)) {
     return {
       status: 'nonready',
       binding: bindingState.binding,
@@ -317,8 +327,23 @@ export function readApprovedTeamExecutionHintFromBinding(
   if (!normalizedBinding) {
     return null;
   }
-  return readApprovedExecutionLaunchHint(cwd, 'team', {
+  const directHint = readApprovedExecutionLaunchHint(cwd, 'team', {
     prdPath: normalizedBinding.prd_path,
+    command: normalizedBinding.command,
+    task: normalizedBinding.task,
+  });
+  if (directHint) {
+    return directHint;
+  }
+
+  const matchedPrdPath = readPlanningArtifacts(cwd).prdPaths.find((candidatePath) =>
+    sameFilePath(candidatePath, normalizedBinding.prd_path));
+  if (!matchedPrdPath || matchedPrdPath === normalizedBinding.prd_path) {
+    return null;
+  }
+
+  return readApprovedExecutionLaunchHint(cwd, 'team', {
+    prdPath: matchedPrdPath,
     command: normalizedBinding.command,
     task: normalizedBinding.task,
   });
@@ -339,7 +364,7 @@ export function hydrateApprovedTeamExecutionHintFromBinding(
   }
 
   return readApprovedExecutionLaunchHint(cwd, 'team', {
-    prdPath: normalizedBinding.prd_path,
+    prdPath: approvedHint.sourcePath,
     command: normalizedBinding.command,
     task: normalizedBinding.task,
     materializeContextRefs: true,
