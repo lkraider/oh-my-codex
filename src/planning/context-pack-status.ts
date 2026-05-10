@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, relative, resolve } from 'node:path';
+import { basename, dirname, relative, resolve } from 'node:path';
 import { planningArtifactSlug } from './artifact-names.js';
 import {
   INITIAL_MARKDOWN_VISIBILITY_STATE,
@@ -16,6 +16,10 @@ const CONTEXT_PACK_OUTCOME_LINE_PATTERN =
 const CONTEXT_PACK_PATH_PATTERN =
   /^\.omx\/context\/context-(?<timestamp>\d{8}T\d{6}Z)-(?<slug>[^/]+)\.json$/i;
 const SHA1_PATTERN = /^[0-9a-f]{40}$/i;
+const CONTEXT_PACK_INDEX_ROLE_ORDER: readonly ContextPackRole[] = ['build', 'verify', 'scope'];
+const CONTEXT_PACK_VIEW_NOTES_START = '<!-- OMX:CONTEXT:VIEW-NOTES:START -->';
+const CONTEXT_PACK_VIEW_NOTES_END = '<!-- OMX:CONTEXT:VIEW-NOTES:END -->';
+const CONTEXT_PACK_VIEW_NOTES_PLACEHOLDER = '<!-- Optional planner-added notes for private context-pack index usage. Keep them concise and preserve the scaffold outside this block. -->';
 
 export const REQUIRED_CONTEXT_PACK_ROLES = ['scope', 'build', 'verify'] as const;
 
@@ -29,6 +33,7 @@ export type ContextPackRoleCoverageState =
   'unknown' | 'missing-required-roles' | 'covered';
 export type ContextPackBasisState = 'stale' | 'fresh';
 export type ContextPackDeclarationState = 'unknown' | 'matching' | 'mismatched';
+export type ContextPackGeneratedIndexState = 'unknown' | 'missing' | 'invalid' | 'ready';
 
 export interface ContextPackRef {
   path: string;
@@ -51,6 +56,7 @@ export interface ContextPackHandoffStatusSnapshot {
   packState: ContextPackPackState;
   roleCoverage: ContextPackRoleCoverageState;
   basisState: ContextPackBasisState;
+  generatedIndexState: ContextPackGeneratedIndexState;
   contextPackRoleRefs: ContextPackRoleRefs | null;
   missingRequiredContextPackRoles: ContextPackRole[];
   contextPackIssues: string[];
@@ -87,6 +93,11 @@ interface ContextPackOutcomeInspection {
   contextPack: ContextPackRef | null;
   declaredPackPath: string | null;
   declaredSlug: string | null;
+  issues: string[];
+}
+
+interface ContextPackGeneratedIndexInspection {
+  generatedIndexState: Exclude<ContextPackGeneratedIndexState, 'unknown'>;
   issues: string[];
 }
 
@@ -487,6 +498,119 @@ function groupContextPackRoleRefs(
   return grouped;
 }
 
+function contextPackIndexPath(packPath: string): string {
+  return packPath.replace(/\.json$/i, '.md');
+}
+
+function renderContextPackGeneratedIndexEntryLine(
+  entry: ContextPackDocument['entries'][number],
+): string {
+  return `- ${entry.path} | roles=${entry.roles.join(',')}`;
+}
+
+function readPreservedContextPackViewNotes(indexPath: string): string[] {
+  if (!existsSync(indexPath)) {
+    return [];
+  }
+
+  const lines = readFileSync(indexPath, 'utf-8').split(/\r?\n/);
+  const start = lines.findIndex((line) => line.trim() === CONTEXT_PACK_VIEW_NOTES_START);
+  const end = lines.findIndex((line, index) => index > start && line.trim() === CONTEXT_PACK_VIEW_NOTES_END);
+  if (start === -1 || end === -1 || end <= start) {
+    return [];
+  }
+
+  const preserved = lines.slice(start + 1, end);
+  while (preserved.length > 0 && preserved[0]!.trim() === '') {
+    preserved.shift();
+  }
+  while (preserved.length > 0 && preserved[preserved.length - 1]!.trim() === '') {
+    preserved.pop();
+  }
+  return preserved;
+}
+
+function renderContextPackGeneratedIndex(
+  packPath: string,
+  document: ContextPackDocument,
+  preservedViewNotes: readonly string[] = [],
+): string {
+  const groupedRoleRefs = groupContextPackRoleRefs(document);
+  const roleSummary = CONTEXT_PACK_INDEX_ROLE_ORDER
+    .filter((role) => groupedRoleRefs[role].length > 0)
+    .map((role) => `${role}=${groupedRoleRefs[role].length}`)
+    .join(', ');
+  const roleIndex = CONTEXT_PACK_INDEX_ROLE_ORDER
+    .filter((role) => groupedRoleRefs[role].length > 0)
+    .map((role) => `- ${role} (${groupedRoleRefs[role].length}): ${groupedRoleRefs[role].join(', ')}`);
+
+  return [
+    '# Context Pack Index',
+    `- pack: ${basename(packPath)}`,
+    `- slug: ${document.slug}`,
+    '',
+    '## Pack Summary',
+    `- entries: ${document.entries.length}`,
+    `- role-refs: ${roleSummary || 'none'}`,
+    '',
+    '## Role Index',
+    ...roleIndex,
+    '',
+    '## View Notes',
+    CONTEXT_PACK_VIEW_NOTES_START,
+    ...(preservedViewNotes.length > 0 ? preservedViewNotes : [CONTEXT_PACK_VIEW_NOTES_PLACEHOLDER]),
+    CONTEXT_PACK_VIEW_NOTES_END,
+    '',
+    '## Refs',
+    ...document.entries.map(renderContextPackGeneratedIndexEntryLine),
+    '',
+  ].join('\n');
+}
+
+function normalizeContextPackGeneratedIndexSnapshot(raw: string): string {
+  return raw.replace(/\r\n/g, '\n').replace(/\n+$/g, '');
+}
+
+function inspectContextPackGeneratedIndex(
+  packPath: string,
+  document: ContextPackDocument,
+): ContextPackGeneratedIndexInspection {
+  const packFile = basename(packPath);
+  const indexPath = contextPackIndexPath(packPath);
+  const indexFile = basename(indexPath);
+  if (!existsSync(indexPath)) {
+    return {
+      generatedIndexState: 'missing',
+      issues: [`${packFile} is missing generated index ${indexFile}.`],
+    };
+  }
+
+  try {
+    const preservedViewNotes = readPreservedContextPackViewNotes(indexPath);
+    const actualIndex = normalizeContextPackGeneratedIndexSnapshot(
+      readFileSync(indexPath, 'utf-8'),
+    );
+    const expectedIndex = normalizeContextPackGeneratedIndexSnapshot(
+      renderContextPackGeneratedIndex(packPath, document, preservedViewNotes),
+    );
+    if (actualIndex === expectedIndex) {
+      return {
+        generatedIndexState: 'ready',
+        issues: [],
+      };
+    }
+    return {
+      generatedIndexState: 'invalid',
+      issues: [`${packFile} generated index ${indexFile} must remain scaffold-only outside View Notes.`],
+    };
+  } catch {
+    return {
+      generatedIndexState: 'invalid',
+      issues: [`${packFile} generated index ${indexFile} could not be read.`],
+    };
+  }
+}
+
 export function readReadyContextPackRoleRefs(
   packPath: string,
 ): ContextPackRoleRefs | null {
@@ -563,6 +687,7 @@ export function resolveContextPackHandoffState(input: {
   packState: ContextPackPackState;
   roleCoverage: ContextPackRoleCoverageState;
   basisState: ContextPackBasisState;
+  generatedIndexState: ContextPackGeneratedIndexState;
 }): ContextPackStatus {
   if (input.baselineState !== 'present') {
     return 'missing-baseline';
@@ -584,6 +709,12 @@ export function resolveContextPackHandoffState(input: {
   }
   if (input.roleCoverage === 'missing-required-roles') {
     return 'incomplete';
+  }
+  if (input.generatedIndexState === 'missing') {
+    return 'incomplete';
+  }
+  if (input.generatedIndexState !== 'ready') {
+    return 'invalid';
   }
   return 'ready';
 }
@@ -611,6 +742,7 @@ export function resolveContextPackHandoffStatus(
   let roleCoverage: ContextPackRoleCoverageState = 'unknown';
   let basisState: ContextPackBasisState = 'stale';
   let declarationState: ContextPackDeclarationState = 'unknown';
+  let generatedIndexState: ContextPackGeneratedIndexState = 'unknown';
   let contextPackRoleRefs: ContextPackRoleRefs | null = null;
   let missingRequiredContextPackRoles: ContextPackRole[] = [];
   let declarationMismatch = false;
@@ -667,6 +799,14 @@ export function resolveContextPackHandoffStatus(
               );
               if (basisIssues.length === 0) {
                 basisState = 'fresh';
+                if (!declarationMismatch && missingRequiredContextPackRoles.length === 0) {
+                  const generatedIndexInspection = inspectContextPackGeneratedIndex(
+                    contextPack.path,
+                    packDocument.document,
+                  );
+                  generatedIndexState = generatedIndexInspection.generatedIndexState;
+                  contextPackIssues.push(...generatedIndexInspection.issues);
+                }
               } else {
                 contextPackIssues.push(...basisIssues);
               }
@@ -692,6 +832,7 @@ export function resolveContextPackHandoffStatus(
     packState,
     roleCoverage,
     basisState,
+    generatedIndexState,
   });
 
   return {
@@ -705,6 +846,7 @@ export function resolveContextPackHandoffStatus(
     packState,
     roleCoverage,
     basisState,
+    generatedIndexState,
     contextPackRoleRefs: contextPackStatus === 'ready' ? contextPackRoleRefs : null,
     missingRequiredContextPackRoles,
     contextPackIssues,

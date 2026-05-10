@@ -37,6 +37,7 @@ function buildReadyApprovedTeamHint(
     deepInterviewSpecPaths: [],
     contextPack: { path: '/repo/.omx/context/context-20260507T120000Z-issue-1314.json' },
     contextPackStatus: 'ready',
+    generatedIndexState: 'ready',
     contextPackRoleRefs: {
       build: ['src/build-entry.ts'],
       verify: ['tests/verify-entry.ts'],

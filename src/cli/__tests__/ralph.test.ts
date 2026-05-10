@@ -216,6 +216,7 @@ const approvedHint: ApprovedExecutionLaunchHint = {
   deepInterviewSpecPaths: ['.omx/specs/deep-interview-issue-1072.md'],
   contextPack: null,
   contextPackStatus: 'plan-only',
+  generatedIndexState: 'unknown',
   contextPackRoleRefs: null,
   missingRequiredContextPackRoles: [],
   contextPackIssues: [],
@@ -377,6 +378,7 @@ describe('ralph deslop launch wiring', () => {
         ...approvedHint,
         contextPack: { path: '.omx/context/context-20260507T120000Z-issue-1072.json' },
         contextPackStatus: 'ready',
+        generatedIndexState: 'ready',
         contextPackRoleRefs: {
           build: ['src/cli/ralph.ts', 'src/planning/artifacts.ts'],
           verify: ['src/cli/__tests__/ralph.test.ts'],

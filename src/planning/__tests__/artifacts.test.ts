@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, it, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import fs, { existsSync } from 'node:fs';
-import { createHash } from 'node:crypto';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, join, relative } from 'node:path';
@@ -16,6 +15,15 @@ import {
   readTeamDagArtifactResolution,
 } from '../artifacts.js';
 import { readTeamDagHandoffForLatestPlan } from '../../team/dag-schema.js';
+import {
+  buildContextPackEntriesFromRoles,
+  buildContextPackOutcome,
+  canonicalContextPackRelativePath,
+  contextPackIndexFixturePath,
+  renderContextPackIndexFixture,
+  type TestContextPackRole,
+  writeContextPackFixture,
+} from './context-pack-fixtures.js';
 
 let tempDir: string;
 
@@ -25,57 +33,25 @@ function encodeApprovedExecutionTask(task: string, quote: 'single' | 'double'): 
     : `"${task.replace(/"/g, '\\"')}"`;
 }
 
-function computeGitBlobSha1(content: string): string {
-  const buffer = Buffer.from(content, 'utf-8');
-  const header = Buffer.from(`blob ${buffer.length}\0`, 'utf-8');
-  return createHash('sha1').update(header).update(buffer).digest('hex');
-}
-
-function relativeToRepo(path: string): string {
-  return relative(tempDir, path).replaceAll('\\', '/');
-}
-
-function canonicalContextPackRelativePath(slug: string): string {
-  return `.omx/context/context-20260507T120000Z-${slug}.json`;
-}
-
-function buildContextPackOutcome(relativePackPath: string): string {
-  return [
-    '## Context Pack Outcome',
-    '',
-    `- pack: created \`${relativePackPath}\``,
-  ].join('\n');
-}
-
 async function writeContextPack(
   slug: string,
   prdPath: string,
   testSpecPath: string,
-  roles: string[],
+  roles: readonly TestContextPackRole[],
+  options: {
+    writeIndex?: boolean;
+    preservedViewNotes?: readonly string[];
+  } = {},
 ): Promise<string> {
-  const contextDir = join(tempDir, '.omx', 'context');
-  await mkdir(contextDir, { recursive: true });
-  const packPath = join(tempDir, canonicalContextPackRelativePath(slug));
-  const prdContent = await readFile(prdPath, 'utf-8');
-  const testSpecContent = await readFile(testSpecPath, 'utf-8');
-  await writeFile(packPath, JSON.stringify({
+  return await writeContextPackFixture({
+    cwd: tempDir,
     slug,
-    basis: {
-      prd: {
-        path: relativeToRepo(prdPath),
-        sha1: computeGitBlobSha1(prdContent),
-      },
-      testSpecs: [{
-        path: relativeToRepo(testSpecPath),
-        sha1: computeGitBlobSha1(testSpecContent),
-      }],
-    },
-    entries: roles.map((role, index) => ({
-      path: `src/${role}-${index}.ts`,
-      roles: [role],
-    })),
-  }, null, 2));
-  return packPath;
+    prdPath,
+    testSpecPath,
+    entries: buildContextPackEntriesFromRoles(roles),
+    writeIndex: options.writeIndex,
+    preservedViewNotes: options.preservedViewNotes,
+  });
 }
 
 async function setup(): Promise<void> {
@@ -375,6 +351,99 @@ describe('planning artifacts', () => {
     });
     assert.deepEqual(hint?.missingRequiredContextPackRoles, []);
     assert.deepEqual(hint?.contextPackIssues, []);
+  });
+
+  it('treats generated-index drift as a private readiness gate while preserving View Notes customizations', async () => {
+    const plansDir = join(tempDir, '.omx', 'plans');
+    await mkdir(plansDir, { recursive: true });
+    const prdPath = join(plansDir, 'prd-context-private-index.md');
+    const testSpecPath = join(plansDir, 'test-spec-context-private-index.md');
+    await writeFile(
+      prdPath,
+      [
+        '# PRD',
+        '',
+        buildContextPackOutcome(canonicalContextPackRelativePath('context-private-index')),
+        '',
+        'Launch via omx ralph "Execute private index handoff"',
+      ].join('\n'),
+    );
+    await writeFile(testSpecPath, '# Test Spec\n');
+    const packPath = await writeContextPack(
+      'context-private-index',
+      prdPath,
+      testSpecPath,
+      ['scope', 'build', 'verify'],
+      {
+        preservedViewNotes: [
+          '- Read the build refs before broader repo search.',
+          '',
+          '- Keep the scaffold outside this block untouched.',
+        ],
+      },
+    );
+
+    {
+      const selection = readLatestPlanningArtifacts(tempDir);
+      const hint = readApprovedExecutionLaunchHint(tempDir, 'ralph');
+      assert.equal(selection.contextPackStatus, 'ready');
+      assert.deepEqual(selection.contextPack, { path: packPath });
+      assert.deepEqual(selection.contextPackRoleRefs, {
+        scope: ['src/scope-0.ts'],
+        build: ['src/build-1.ts'],
+        verify: ['src/verify-2.ts'],
+      });
+      assert.deepEqual(selection.contextPackIssues, []);
+      assert.equal(hint?.contextPackStatus, 'ready');
+      assert.deepEqual(hint?.contextPackRoleRefs, {
+        scope: ['src/scope-0.ts'],
+        build: ['src/build-1.ts'],
+        verify: ['src/verify-2.ts'],
+      });
+      assert.deepEqual(hint?.contextPackIssues, []);
+    }
+
+    await rm(contextPackIndexFixturePath(packPath));
+    {
+      const selection = readLatestPlanningArtifacts(tempDir);
+      const hint = readApprovedExecutionLaunchHint(tempDir, 'ralph');
+      assert.equal(selection.contextPackStatus, 'incomplete');
+      assert.deepEqual(selection.contextPack, { path: packPath });
+      assert.equal(selection.contextPackRoleRefs, null);
+      assert.deepEqual(selection.missingRequiredContextPackRoles, []);
+      assert.ok(selection.contextPackIssues.some((issue) => issue.includes('is missing generated index')));
+      assert.equal(hint?.contextPackStatus, 'incomplete');
+      assert.equal(hint?.contextPackRoleRefs, null);
+      assert.deepEqual(hint?.missingRequiredContextPackRoles, []);
+      assert.ok(hint?.contextPackIssues.some((issue) => issue.includes('is missing generated index')));
+    }
+
+    await writeFile(
+      contextPackIndexFixturePath(packPath),
+      renderContextPackIndexFixture(
+        packPath,
+        'context-private-index',
+        buildContextPackEntriesFromRoles(['scope', 'build', 'verify']),
+        ['- Restored note'],
+      ).replace('## Refs', '## Extra Section\n- drift\n\n## Refs'),
+    );
+    {
+      const selection = readLatestPlanningArtifacts(tempDir);
+      const hint = readApprovedExecutionLaunchHint(tempDir, 'ralph');
+      assert.equal(selection.contextPackStatus, 'invalid');
+      assert.deepEqual(selection.contextPack, { path: packPath });
+      assert.equal(selection.contextPackRoleRefs, null);
+      assert.deepEqual(selection.missingRequiredContextPackRoles, []);
+      assert.ok(selection.contextPackIssues.some((issue) => issue.includes(
+        'must remain scaffold-only outside View Notes',
+      )));
+      assert.equal(hint?.contextPackStatus, 'invalid');
+      assert.equal(hint?.contextPackRoleRefs, null);
+      assert.deepEqual(hint?.missingRequiredContextPackRoles, []);
+      assert.ok(hint?.contextPackIssues.some((issue) => issue.includes(
+        'must remain scaffold-only outside View Notes',
+      )));
+    }
   });
 
   it('preserves invalid context-pack issues on approved hints without widening them into missing roles', async () => {

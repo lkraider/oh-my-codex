@@ -1,8 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { mkdtemp, rm, mkdir, readFile, writeFile } from 'fs/promises';
-import { basename, dirname, join, relative } from 'path';
+import { basename, dirname, join } from 'path';
 import { tmpdir } from 'os';
 import { existsSync } from 'fs';
 import type { StageContext } from '../types.js';
@@ -11,6 +10,12 @@ import { createTeamExecStage, buildTeamInstruction } from '../stages/team-exec.j
 import { createRalphVerifyStage, createRalphStage, buildRalphInstruction } from '../stages/ralph-verify.js';
 import { createCodeReviewStage, buildCodeReviewInstruction } from '../stages/code-review.js';
 import { buildFollowupStaffingPlan } from '../../team/followup-planner.js';
+import {
+  buildContextPackEntriesFromRoles,
+  buildContextPackOutcome,
+  canonicalContextPackRelativePath,
+  writeContextPackFixture,
+} from '../../planning/__tests__/context-pack-fixtures.js';
 import { packageRoot } from '../../utils/paths.js';
 
 // ---------------------------------------------------------------------------
@@ -25,52 +30,19 @@ function encodeApprovedExecutionTask(task: string, quote: 'single' | 'double'): 
     : `"${task.replace(/"/g, '\\"')}"`;
 }
 
-function computeGitBlobSha1(content: string): string {
-  const buffer = Buffer.from(content, 'utf-8');
-  const header = Buffer.from(`blob ${buffer.length}\0`, 'utf-8');
-  return createHash('sha1').update(header).update(buffer).digest('hex');
-}
-
-function canonicalContextPackRelativePath(slug: string): string {
-  return `.omx/context/context-20260507T120000Z-${slug}.json`;
-}
-
-function buildContextPackOutcome(relativePackPath: string): string {
-  return [
-    '## Context Pack Outcome',
-    '',
-    `- pack: created \`${relativePackPath}\``,
-  ].join('\n');
-}
-
 async function writeReadyContextPack(
   cwd: string,
   slug: string,
   prdPath: string,
   testSpecPath: string,
 ): Promise<void> {
-  const contextDir = join(cwd, '.omx', 'context');
-  const packPath = join(cwd, canonicalContextPackRelativePath(slug));
-  const prdContent = await readFile(prdPath, 'utf-8');
-  const testSpecContent = await readFile(testSpecPath, 'utf-8');
-  await mkdir(contextDir, { recursive: true });
-  await writeFile(packPath, JSON.stringify({
+  await writeContextPackFixture({
+    cwd,
     slug,
-    basis: {
-      prd: {
-        path: relative(cwd, prdPath).replaceAll('\\', '/'),
-        sha1: computeGitBlobSha1(prdContent),
-      },
-      testSpecs: [{
-        path: relative(cwd, testSpecPath).replaceAll('\\', '/'),
-        sha1: computeGitBlobSha1(testSpecContent),
-      }],
-    },
-    entries: ['scope', 'build', 'verify'].map((role, index) => ({
-      path: `src/${role}-${index}.ts`,
-      roles: [role],
-    })),
-  }, null, 2));
+    prdPath,
+    testSpecPath,
+    entries: buildContextPackEntriesFromRoles(['scope', 'build', 'verify']),
+  });
 }
 
 function makeCtx(overrides: Partial<StageContext> = {}): StageContext {

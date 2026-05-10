@@ -1,9 +1,8 @@
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'child_process';
 import { mkdtemp, rm, writeFile, readFile, mkdir, chmod, readdir } from 'fs/promises';
-import { join, relative } from 'path';
+import { join } from 'path';
 import { tmpdir } from 'os';
 import { existsSync } from 'fs';
 import { HUD_TMUX_TEAM_HEIGHT_LINES } from '../../hud/constants.js';
@@ -49,6 +48,12 @@ import { readTeamEvents } from '../state/events.js';
 import { sanitizeTeamName } from '../tmux-session.js';
 import { buildInternalTeamName, resolveTeamIdentityScope } from '../team-identity.js';
 import { writePersistedApprovedTeamExecutionBinding } from '../approved-execution.js';
+import {
+  buildContextPackEntriesFromRoles,
+  buildContextPackOutcome,
+  canonicalContextPackRelativePath,
+  writeContextPackFixture,
+} from '../../planning/__tests__/context-pack-fixtures.js';
 
 const coverageRun = process.env.NODE_V8_COVERAGE ? true : false;
 const skipSlowLifecycleUnderCoverage = coverageRun
@@ -72,52 +77,19 @@ async function addWorktree(repo: string, branchName: string, pathPrefix: string)
   return worktreePath;
 }
 
-function computeGitBlobSha1(content: string): string {
-  const buffer = Buffer.from(content, 'utf-8');
-  const header = Buffer.from(`blob ${buffer.length}\0`, 'utf-8');
-  return createHash('sha1').update(header).update(buffer).digest('hex');
-}
-
-function canonicalContextPackRelativePath(slug: string): string {
-  return `.omx/context/context-20260507T120000Z-${slug}.json`;
-}
-
-function buildContextPackOutcome(relativePackPath: string): string {
-  return [
-    '## Context Pack Outcome',
-    '',
-    `- pack: created \`${relativePackPath}\``,
-  ].join('\n');
-}
-
 async function writeReadyContextPack(
   cwd: string,
   slug: string,
   prdPath: string,
   testSpecPath: string,
 ): Promise<void> {
-  const contextDir = join(cwd, '.omx', 'context');
-  const packPath = join(cwd, canonicalContextPackRelativePath(slug));
-  const prdContent = await readFile(prdPath, 'utf-8');
-  const testSpecContent = await readFile(testSpecPath, 'utf-8');
-  await mkdir(contextDir, { recursive: true });
-  await writeFile(packPath, JSON.stringify({
+  await writeContextPackFixture({
+    cwd,
     slug,
-    basis: {
-      prd: {
-        path: relative(cwd, prdPath).replaceAll('\\', '/'),
-        sha1: computeGitBlobSha1(prdContent),
-      },
-      testSpecs: [{
-        path: relative(cwd, testSpecPath).replaceAll('\\', '/'),
-        sha1: computeGitBlobSha1(testSpecContent),
-      }],
-    },
-    entries: ['scope', 'build', 'verify'].map((role, index) => ({
-      path: `src/${role}-${index}.ts`,
-      roles: [role],
-    })),
-  }, null, 2));
+    prdPath,
+    testSpecPath,
+    entries: buildContextPackEntriesFromRoles(['scope', 'build', 'verify']),
+  });
 }
 
 async function attachDirtyWorkerRepo(teamName: string, cwd: string, repoName: string): Promise<void> {

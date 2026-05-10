@@ -10,6 +10,7 @@ import {
 import {
   isApprovedExecutionFollowupReadyStatus,
   resolveContextPackHandoffStatus,
+  type ContextPackGeneratedIndexState,
   type ContextPackHandoffStatusSnapshot,
   type ContextPackRef,
   type ContextPackRole,
@@ -35,6 +36,7 @@ export type {
   ContextPackBaselineState,
   ContextPackBasisState,
   ContextPackDeclarationState,
+  ContextPackGeneratedIndexState,
   ContextPackOutcomeState,
   ContextPackPackState,
   ContextPackRef,
@@ -70,6 +72,7 @@ export interface ApprovedPlanContext {
   deepInterviewSpecPaths: string[];
   contextPack: ContextPackRef | null;
   contextPackStatus: ContextPackStatus;
+  generatedIndexState: ContextPackGeneratedIndexState;
   contextPackRoleRefs: ContextPackRoleRefs | null;
   missingRequiredContextPackRoles: ContextPackRole[];
   contextPackIssues: string[];
@@ -91,6 +94,7 @@ export interface LatestPlanningArtifactSelection {
   deepInterviewSpecPaths: string[];
   contextPack: ContextPackRef | null;
   contextPackStatus: ContextPackStatus;
+  generatedIndexState: ContextPackGeneratedIndexState;
   contextPackRoleRefs: ContextPackRoleRefs | null;
   missingRequiredContextPackRoles: ContextPackRole[];
   contextPackIssues: string[];
@@ -277,6 +281,7 @@ function selectPlanningArtifacts(
     ...selection,
     contextPack: handoffStatus.contextPack,
     contextPackStatus: handoffStatus.contextPackStatus,
+    generatedIndexState: handoffStatus.generatedIndexState,
     contextPackRoleRefs,
     missingRequiredContextPackRoles: handoffStatus.missingRequiredContextPackRoles,
     contextPackIssues: handoffStatus.contextPackIssues,
@@ -359,6 +364,7 @@ function readApprovedPlanText(
         deepInterviewSpecPaths: selection.deepInterviewSpecPaths,
         contextPack: selection.contextPack,
         contextPackStatus: selection.contextPackStatus,
+        generatedIndexState: selection.generatedIndexState,
         contextPackRoleRefs: selection.contextPackRoleRefs,
         missingRequiredContextPackRoles: selection.missingRequiredContextPackRoles,
         contextPackIssues: selection.contextPackIssues,

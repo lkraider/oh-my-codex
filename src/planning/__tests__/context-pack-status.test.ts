@@ -1,38 +1,33 @@
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, relative } from 'node:path';
+import { join } from 'node:path';
 import {
   readContextPackHandoffStatus,
   resolveContextPackHandoffState,
 } from '../artifacts.js';
+import type {
+  ContextPackBasisState,
+  ContextPackDeclarationState,
+  ContextPackGeneratedIndexState,
+  ContextPackPackState,
+  ContextPackRoleCoverageState,
+  ContextPackStatus,
+} from '../artifacts.js';
+import {
+  buildContextPackEntriesFromRoles,
+  buildContextPackOutcome,
+  canonicalContextPackRelativePath,
+  contextPackIndexFixturePath,
+  renderContextPackIndexFixture,
+  type TestContextPackRole,
+  writeContextPackFixture,
+} from './context-pack-fixtures.js';
 
 let tempDir: string;
-
-function computeGitBlobSha1(content: string): string {
-  const buffer = Buffer.from(content, 'utf-8');
-  const header = Buffer.from(`blob ${buffer.length}\0`, 'utf-8');
-  return createHash('sha1').update(header).update(buffer).digest('hex');
-}
-
-function relativeToRepo(path: string): string {
-  return relative(tempDir, path).replaceAll('\\', '/');
-}
-
-function canonicalContextPackRelativePath(slug: string): string {
-  return `.omx/context/context-20260507T120000Z-${slug}.json`;
-}
-
-function buildContextPackOutcome(relativePackPath: string): string {
-  return [
-    '## Context Pack Outcome',
-    '',
-    `- pack: created \`${relativePackPath}\``,
-  ].join('\n');
-}
+const REQUIRED_ROLES = ['scope', 'build', 'verify'] as const;
 
 async function setup(): Promise<void> {
   tempDir = await mkdtemp(join(tmpdir(), 'omx-context-pack-status-'));
@@ -68,28 +63,23 @@ async function writeContextPack(
   slug: string,
   prdPath: string,
   testSpecPath: string,
-  roles: string[],
+  roles: readonly TestContextPackRole[],
+  options: {
+    writeIndex?: boolean;
+    preservedViewNotes?: readonly string[];
+  } = {},
 ): Promise<void> {
-  const packPath = join(tempDir, canonicalContextPackRelativePath(slug));
-  const prdActual = await readFile(prdPath, 'utf-8');
-  const testSpecActual = await readFile(testSpecPath, 'utf-8');
-  await writeFile(packPath, JSON.stringify({
+  const shouldWriteIndex = options.writeIndex
+    ?? REQUIRED_ROLES.every((role) => roles.includes(role));
+  await writeContextPackFixture({
+    cwd: tempDir,
     slug,
-    basis: {
-      prd: {
-        path: relativeToRepo(prdPath),
-        sha1: computeGitBlobSha1(prdActual),
-      },
-      testSpecs: [{
-        path: relativeToRepo(testSpecPath),
-        sha1: computeGitBlobSha1(testSpecActual),
-      }],
-    },
-    entries: roles.map((role, index) => ({
-      path: `src/${role}-${index}.ts`,
-      roles: [role],
-    })),
-  }, null, 2));
+    prdPath,
+    testSpecPath,
+    entries: buildContextPackEntriesFromRoles(roles),
+    writeIndex: shouldWriteIndex,
+    preservedViewNotes: options.preservedViewNotes,
+  });
 }
 
 describe('context pack handoff status', () => {
@@ -103,6 +93,7 @@ describe('context pack handoff status', () => {
       packState: 'missing',
       roleCoverage: 'unknown',
       basisState: 'stale',
+      generatedIndexState: 'unknown',
     }), 'missing-baseline');
     assert.equal(resolveContextPackHandoffState({
       baselineState: 'present',
@@ -110,6 +101,7 @@ describe('context pack handoff status', () => {
       packState: 'missing',
       roleCoverage: 'unknown',
       basisState: 'stale',
+      generatedIndexState: 'unknown',
     }), 'plan-only');
     assert.equal(resolveContextPackHandoffState({
       baselineState: 'present',
@@ -117,6 +109,7 @@ describe('context pack handoff status', () => {
       packState: 'missing',
       roleCoverage: 'unknown',
       basisState: 'stale',
+      generatedIndexState: 'unknown',
     }), 'incomplete');
     assert.equal(resolveContextPackHandoffState({
       baselineState: 'present',
@@ -124,6 +117,7 @@ describe('context pack handoff status', () => {
       packState: 'valid',
       roleCoverage: 'covered',
       basisState: 'fresh',
+      generatedIndexState: 'ready',
     }), 'ready');
     assert.equal(resolveContextPackHandoffState({
       baselineState: 'present',
@@ -131,6 +125,7 @@ describe('context pack handoff status', () => {
       packState: 'valid',
       roleCoverage: 'unknown',
       basisState: 'fresh',
+      generatedIndexState: 'unknown',
     }), 'invalid');
     assert.equal(resolveContextPackHandoffState({
       baselineState: 'present',
@@ -138,7 +133,35 @@ describe('context pack handoff status', () => {
       packState: 'valid',
       roleCoverage: 'covered',
       basisState: 'stale',
+      generatedIndexState: 'ready',
     }), 'invalid');
+  });
+
+  it('maps generated index readiness into the handoff state machine once the pack would otherwise be ready', () => {
+    assert.equal(resolveContextPackHandoffState({
+      baselineState: 'present',
+      outcomeState: 'declared',
+      packState: 'valid',
+      roleCoverage: 'covered',
+      basisState: 'fresh',
+      generatedIndexState: 'missing',
+    }), 'incomplete');
+    assert.equal(resolveContextPackHandoffState({
+      baselineState: 'present',
+      outcomeState: 'declared',
+      packState: 'valid',
+      roleCoverage: 'covered',
+      basisState: 'fresh',
+      generatedIndexState: 'invalid',
+    }), 'invalid');
+    assert.equal(resolveContextPackHandoffState({
+      baselineState: 'present',
+      outcomeState: 'declared',
+      packState: 'valid',
+      roleCoverage: 'missing-required-roles',
+      basisState: 'fresh',
+      generatedIndexState: 'invalid',
+    }), 'incomplete');
   });
 
   it('reports plan-only when the approved baseline has no declared context pack', async () => {
@@ -179,6 +202,7 @@ describe('context pack handoff status', () => {
     assert.equal(status.declarationState, 'matching');
     assert.equal(status.roleCoverage, 'covered');
     assert.equal(status.basisState, 'fresh');
+    assert.equal(status.generatedIndexState, 'ready');
     assert.deepEqual(status.contextPackRoleRefs, {
       scope: ['src/scope-0.ts'],
       build: ['src/build-1.ts'],
@@ -202,6 +226,7 @@ describe('context pack handoff status', () => {
 
     assert.equal(status.contextPackStatus, 'incomplete');
     assert.equal(status.roleCoverage, 'missing-required-roles');
+    assert.equal(status.generatedIndexState, 'unknown');
     assert.equal(status.contextPackRoleRefs, null);
     assert.equal(status.roleCoverage, 'missing-required-roles');
     assert.deepEqual(status.missingRequiredContextPackRoles, ['build', 'verify']);
@@ -223,6 +248,7 @@ describe('context pack handoff status', () => {
     assert.equal(status.contextPackStatus, 'invalid');
     assert.equal(status.roleCoverage, 'covered');
     assert.equal(status.basisState, 'stale');
+    assert.equal(status.generatedIndexState, 'unknown');
     assert.equal(status.contextPackRoleRefs, null);
     assert.equal(status.basisState, 'stale');
     assert.deepEqual(status.missingRequiredContextPackRoles, []);
@@ -244,6 +270,7 @@ describe('context pack handoff status', () => {
 
     assert.equal(status.contextPackStatus, 'invalid');
     assert.equal(status.roleCoverage, 'missing-required-roles');
+    assert.equal(status.generatedIndexState, 'unknown');
     assert.equal(status.contextPackRoleRefs, null);
     assert.deepEqual(status.missingRequiredContextPackRoles, ['build', 'verify']);
     assert.ok(status.contextPackIssues.some((issue) => issue.includes('basis test-spec hash')));
@@ -263,10 +290,252 @@ describe('context pack handoff status', () => {
 
     assert.equal(status.contextPackStatus, 'invalid');
     assert.equal(status.packState, 'invalid');
+    assert.equal(status.generatedIndexState, 'unknown');
     assert.equal(status.contextPackRoleRefs, null);
     assert.equal(status.roleCoverage, 'unknown');
     assert.deepEqual(status.missingRequiredContextPackRoles, []);
     assert.ok(status.contextPackIssues.some((issue) => issue.includes('invalid JSON')));
+  });
+
+  it('keeps the pack ready when only View Notes drift while failing closed for missing or drifted generated indexes', async () => {
+    const { prdPath, testSpecPath, packPath } = await writeApprovedPlan('beta-index', [
+      '# PRD',
+      '',
+      buildContextPackOutcome(canonicalContextPackRelativePath('beta-index')),
+      '',
+      'Launch via omx ralph "Execute beta index plan"',
+    ]);
+    await writeContextPack('beta-index', prdPath, testSpecPath, ['scope', 'build', 'verify'], {
+      preservedViewNotes: [
+        '- Prefer the build refs first unless the request is purely verification.',
+        '',
+        '- Keep the scaffold intact outside this block.',
+      ],
+    });
+
+    {
+      const status = readContextPackHandoffStatus(tempDir);
+      assert.equal(status.contextPackStatus, 'ready');
+      assert.equal(status.generatedIndexState, 'ready');
+      assert.deepEqual(status.contextPackIssues, []);
+    }
+
+    await rm(contextPackIndexFixturePath(packPath));
+    {
+      const status = readContextPackHandoffStatus(tempDir);
+      assert.equal(status.contextPackStatus, 'incomplete');
+      assert.equal(status.generatedIndexState, 'missing');
+      assert.equal(status.contextPackRoleRefs, null);
+      assert.deepEqual(status.missingRequiredContextPackRoles, []);
+      assert.ok(status.contextPackIssues.some((issue) => issue.includes('is missing generated index')));
+    }
+
+    await writeFile(
+      contextPackIndexFixturePath(packPath),
+      renderContextPackIndexFixture(
+        packPath,
+        'beta-index',
+        buildContextPackEntriesFromRoles(['scope', 'build', 'verify']),
+        ['- Restored note'],
+      ).replace('## Refs', '## Extra Brief\n- stale requirement\n\n## Refs'),
+    );
+    {
+      const status = readContextPackHandoffStatus(tempDir);
+      assert.equal(status.contextPackStatus, 'invalid');
+      assert.equal(status.generatedIndexState, 'invalid');
+      assert.equal(status.contextPackRoleRefs, null);
+      assert.ok(status.contextPackIssues.some((issue) => issue.includes('must remain scaffold-only outside View Notes')));
+    }
+  });
+
+  it('keeps nonready base states stable across generated-index counterfactuals while only otherwise-ready packs pay the new gate', async () => {
+    const scenarios: Array<{
+      name: string;
+      roles: readonly TestContextPackRole[];
+      mutate?: (fixture: Awaited<ReturnType<typeof writeApprovedPlan>>) => Promise<void>;
+      expected: {
+        status: ContextPackStatus;
+        roleCoverage: ContextPackRoleCoverageState;
+        basisState: ContextPackBasisState;
+        generatedIndexState: ContextPackGeneratedIndexState;
+        missingRoles?: readonly TestContextPackRole[];
+        issue?: string;
+      };
+    }> = [
+      {
+        name: 'ready',
+        roles: ['scope', 'build', 'verify'],
+        expected: {
+          status: 'ready',
+          roleCoverage: 'covered',
+          basisState: 'fresh',
+          generatedIndexState: 'ready',
+        },
+      },
+      {
+        name: 'missing-role',
+        roles: ['scope'],
+        expected: {
+          status: 'incomplete',
+          roleCoverage: 'missing-required-roles',
+          basisState: 'fresh',
+          generatedIndexState: 'unknown',
+          missingRoles: ['build', 'verify'],
+        },
+      },
+      {
+        name: 'stale-basis',
+        roles: ['scope', 'build', 'verify'],
+        mutate: async ({ testSpecPath }) => {
+          await writeFile(testSpecPath, '# Drifted Test Spec\n');
+        },
+        expected: {
+          status: 'invalid',
+          roleCoverage: 'covered',
+          basisState: 'stale',
+          generatedIndexState: 'unknown',
+          issue: 'basis test-spec hash',
+        },
+      },
+    ];
+    const indexModes: Array<{
+      name: string;
+      apply: (
+        packPath: string,
+        slug: string,
+        roles: readonly TestContextPackRole[],
+      ) => Promise<void>;
+      expectedForReady: {
+        status: ContextPackStatus;
+        generatedIndexState: ContextPackGeneratedIndexState;
+        issue?: string;
+      };
+    }> = [
+      {
+        name: 'valid-scaffold',
+        apply: async () => {},
+        expectedForReady: {
+          status: 'ready',
+          generatedIndexState: 'ready',
+        },
+      },
+      {
+        name: 'missing-index',
+        apply: async (packPath) => {
+          await rm(contextPackIndexFixturePath(packPath), { force: true });
+        },
+        expectedForReady: {
+          status: 'incomplete',
+          generatedIndexState: 'missing',
+          issue: 'is missing generated index',
+        },
+      },
+      {
+        name: 'notes-only',
+        apply: async (packPath, slug, roles) => {
+          await writeFile(
+            contextPackIndexFixturePath(packPath),
+            renderContextPackIndexFixture(
+              packPath,
+              slug,
+              buildContextPackEntriesFromRoles(roles),
+              ['- Prefer the build lane first.', '', '- Verification can follow second.'],
+            ),
+          );
+        },
+        expectedForReady: {
+          status: 'ready',
+          generatedIndexState: 'ready',
+        },
+      },
+      {
+        name: 'drifted-scaffold',
+        apply: async (packPath, slug, roles) => {
+          await writeFile(
+            contextPackIndexFixturePath(packPath),
+            renderContextPackIndexFixture(
+              packPath,
+              slug,
+              buildContextPackEntriesFromRoles(roles),
+            ).replace(`- slug: ${slug}`, `- slug: ${slug}-drifted`),
+          );
+        },
+        expectedForReady: {
+          status: 'invalid',
+          generatedIndexState: 'invalid',
+          issue: 'must remain scaffold-only outside View Notes',
+        },
+      },
+      {
+        name: 'unreadable-index',
+        apply: async (packPath) => {
+          await rm(contextPackIndexFixturePath(packPath), { force: true });
+          await mkdir(contextPackIndexFixturePath(packPath), { recursive: true });
+        },
+        expectedForReady: {
+          status: 'invalid',
+          generatedIndexState: 'invalid',
+          issue: 'could not be read',
+        },
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      for (const indexMode of indexModes) {
+        const slug = `${scenario.name}-${indexMode.name}`;
+        const fixture = await writeApprovedPlan(slug, [
+          '# PRD',
+          '',
+          buildContextPackOutcome(canonicalContextPackRelativePath(slug)),
+          '',
+          `Launch via omx ralph ${JSON.stringify(`Execute ${slug} plan`)}`,
+        ]);
+        const packPath = join(tempDir, canonicalContextPackRelativePath(slug));
+        await writeContextPack(slug, fixture.prdPath, fixture.testSpecPath, scenario.roles);
+        if (scenario.mutate) {
+          await scenario.mutate(fixture);
+        }
+        await indexMode.apply(packPath, slug, scenario.roles);
+
+        const status = readContextPackHandoffStatus(tempDir, fixture.prdPath);
+        const expected = scenario.name === 'ready'
+          ? {
+            status: indexMode.expectedForReady.status,
+            generatedIndexState: indexMode.expectedForReady.generatedIndexState,
+            issue: indexMode.expectedForReady.issue,
+          }
+          : {
+            status: scenario.expected.status,
+            generatedIndexState: scenario.expected.generatedIndexState,
+            issue: scenario.expected.issue,
+          };
+
+        assert.equal(status.contextPackStatus, expected.status, `status mismatch for ${slug}`);
+        assert.equal(status.roleCoverage, scenario.expected.roleCoverage, `roleCoverage mismatch for ${slug}`);
+        assert.equal(status.basisState, scenario.expected.basisState, `basisState mismatch for ${slug}`);
+        assert.equal(status.generatedIndexState, expected.generatedIndexState, `generatedIndexState mismatch for ${slug}`);
+        assert.deepEqual(
+          status.missingRequiredContextPackRoles,
+          scenario.expected.missingRoles ?? [],
+          `missing roles mismatch for ${slug}`,
+        );
+        if (expected.issue) {
+          assert.ok(
+            status.contextPackIssues.some((issue) => issue.includes(expected.issue ?? '')),
+            `expected issue containing ${expected.issue} for ${slug}`,
+          );
+        } else {
+          assert.equal(
+            status.contextPackIssues.some((issue) =>
+              issue.includes('generated index')
+              || issue.includes('scaffold-only outside View Notes')
+            ),
+            false,
+            `did not expect generated-index issue for ${slug}`,
+          );
+        }
+      }
+    }
   });
 
   it('ignores fenced outcome declarations and keeps the plan in plan-only status', async () => {
@@ -452,24 +721,26 @@ describe('context pack handoff status', () => {
       slug: string;
       mutate: (fixture: Awaited<ReturnType<typeof writeApprovedPlan>>) => Promise<void>;
       expected: {
-        status: string;
-        packState: string;
-        declarationState: string;
-        basisState: string;
-        roleCoverage: string;
+        status: ContextPackStatus;
+        packState: ContextPackPackState;
+        declarationState: ContextPackDeclarationState;
+        basisState: ContextPackBasisState;
+        roleCoverage: ContextPackRoleCoverageState;
+        generatedIndexState: ContextPackGeneratedIndexState;
         issue?: string;
-        missingRoles?: string[];
+        missingRoles?: readonly TestContextPackRole[];
       };
     }> = [
       {
         slug: 'missing-pack',
-        mutate: async () => {},
+      mutate: async () => {},
         expected: {
           status: 'incomplete',
           packState: 'missing',
           declarationState: 'matching',
           basisState: 'stale',
           roleCoverage: 'unknown',
+          generatedIndexState: 'unknown',
           issue: 'file is missing',
         },
       },
@@ -482,6 +753,7 @@ describe('context pack handoff status', () => {
           declarationState: 'matching',
           basisState: 'stale',
           roleCoverage: 'unknown',
+          generatedIndexState: 'unknown',
           issue: 'could not be read',
         },
       },
@@ -494,6 +766,7 @@ describe('context pack handoff status', () => {
           declarationState: 'matching',
           basisState: 'stale',
           roleCoverage: 'unknown',
+          generatedIndexState: 'unknown',
           issue: 'invalid JSON',
         },
       },
@@ -509,6 +782,7 @@ describe('context pack handoff status', () => {
           declarationState: 'matching',
           basisState: 'stale',
           roleCoverage: 'covered',
+          generatedIndexState: 'unknown',
           issue: 'basis test-spec hash',
         },
       },
@@ -523,6 +797,7 @@ describe('context pack handoff status', () => {
           declarationState: 'matching',
           basisState: 'fresh',
           roleCoverage: 'missing-required-roles',
+          generatedIndexState: 'unknown',
           missingRoles: ['build', 'verify'],
         },
       },
@@ -545,6 +820,7 @@ describe('context pack handoff status', () => {
       assert.equal(status.declarationState, testCase.expected.declarationState);
       assert.equal(status.basisState, testCase.expected.basisState);
       assert.equal(status.roleCoverage, testCase.expected.roleCoverage);
+      assert.equal(status.generatedIndexState, testCase.expected.generatedIndexState);
       assert.deepEqual(
         status.missingRequiredContextPackRoles,
         testCase.expected.missingRoles ?? [],

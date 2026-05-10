@@ -1,16 +1,22 @@
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, it, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { join, relative } from 'node:path';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { buildLeaderMonitoringHints, parseTeamStartArgs, teamCommand } from '../team.js';
 import { readModeState } from '../../modes/base.js';
 import { readApprovedExecutionLaunchHint } from '../../planning/artifacts.js';
+import {
+  buildContextPackEntriesFromRoles,
+  buildContextPackOutcome,
+  canonicalContextPackRelativePath,
+  type TestContextPackRole,
+  writeContextPackFixture,
+} from '../../planning/__tests__/context-pack-fixtures.js';
 import { buildRepoAwareTeamExecutionPlan } from '../../team/repo-aware-decomposition.js';
 import { DEFAULT_MAX_WORKERS } from '../../team/state.js';
 import { shutdownTeam } from '../../team/runtime.js';
@@ -42,53 +48,21 @@ function encodeApprovedExecutionTask(task: string, quote: 'single' | 'double'): 
     : `"${task.replace(/"/g, '\\"')}"`;
 }
 
-function computeGitBlobSha1(content: string): string {
-  const buffer = Buffer.from(content, 'utf-8');
-  const header = Buffer.from(`blob ${buffer.length}\0`, 'utf-8');
-  return createHash('sha1').update(header).update(buffer).digest('hex');
-}
-
-function canonicalContextPackRelativePath(slug: string): string {
-  return `.omx/context/context-20260507T120000Z-${slug}.json`;
-}
-
-function buildContextPackOutcome(relativePackPath: string): string {
-  return [
-    '## Context Pack Outcome',
-    '',
-    `- pack: created \`${relativePackPath}\``,
-  ].join('\n');
-}
-
 async function writeContextPack(
   cwd: string,
   slug: string,
   prdPath: string,
   testSpecPath: string,
-  roles: readonly string[],
+  roles: readonly TestContextPackRole[],
 ): Promise<void> {
-  const contextDir = join(cwd, '.omx', 'context');
-  const packPath = join(cwd, canonicalContextPackRelativePath(slug));
-  const prdContent = await readFile(prdPath, 'utf-8');
-  const testSpecContent = await readFile(testSpecPath, 'utf-8');
-  await mkdir(contextDir, { recursive: true });
-  await writeFile(packPath, JSON.stringify({
+  await writeContextPackFixture({
+    cwd,
     slug,
-    basis: {
-      prd: {
-        path: relative(cwd, prdPath).replaceAll('\\', '/'),
-        sha1: computeGitBlobSha1(prdContent),
-      },
-      testSpecs: [{
-        path: relative(cwd, testSpecPath).replaceAll('\\', '/'),
-        sha1: computeGitBlobSha1(testSpecContent),
-      }],
-    },
-    entries: roles.map((role, index) => ({
-      path: `src/${role}-${index}.ts`,
-      roles: [role],
-    })),
-  }, null, 2));
+    prdPath,
+    testSpecPath,
+    entries: buildContextPackEntriesFromRoles(roles),
+    writeIndex: (['scope', 'build', 'verify'] as const).every((role) => roles.includes(role)),
+  });
 }
 
 async function writeReadyContextPack(

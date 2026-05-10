@@ -1,9 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm, readFile, writeFile, mkdir, chmod, readdir } from 'fs/promises';
-import { join, relative } from 'path';
+import { join } from 'path';
 import { tmpdir } from 'os';
 import { existsSync, readFileSync } from 'fs';
 import {
@@ -22,6 +21,13 @@ import {
   resolvePersistedApprovedTeamExecutionContinuityState,
   writePersistedApprovedTeamExecutionBinding,
 } from '../approved-execution.js';
+import {
+  buildContextPackEntriesFromRoles,
+  buildContextPackOutcome,
+  canonicalContextPackRelativePath,
+  type TestContextPackRole,
+  writeContextPackFixture,
+} from '../../planning/__tests__/context-pack-fixtures.js';
 
 delete process.env.OMX_TEAM_STATE_ROOT;
 
@@ -43,26 +49,6 @@ async function initRepo(): Promise<string> {
   execFileSync('git', ['commit', '-m', 'init'], { cwd, stdio: 'ignore' });
   return cwd;
 }
-
-function computeGitBlobSha1(content: string): string {
-  const buffer = Buffer.from(content, 'utf-8');
-  const header = Buffer.from(`blob ${buffer.length}\0`, 'utf-8');
-  return createHash('sha1').update(header).update(buffer).digest('hex');
-}
-
-function canonicalContextPackRelativePath(slug: string): string {
-  return `.omx/context/context-20260507T120000Z-${slug}.json`;
-}
-
-function buildContextPackOutcome(relativePackPath: string): string {
-  return [
-    '## Context Pack Outcome',
-    '',
-    `- pack: created \`${relativePackPath}\``,
-  ].join('\n');
-}
-
-type ContextPackRole = 'scope' | 'build' | 'verify';
 
 type ScaleUpApprovedBindingState =
   | 'missing'
@@ -162,30 +148,16 @@ async function writeContextPack(
   slug: string,
   prdPath: string,
   testSpecPath: string,
-  roles: readonly ContextPackRole[],
+  roles: readonly TestContextPackRole[],
 ): Promise<void> {
-  const contextDir = join(cwd, '.omx', 'context');
-  const packPath = join(cwd, canonicalContextPackRelativePath(slug));
-  const prdContent = await readFile(prdPath, 'utf-8');
-  const testSpecContent = await readFile(testSpecPath, 'utf-8');
-  await mkdir(contextDir, { recursive: true });
-  await writeFile(packPath, JSON.stringify({
+  await writeContextPackFixture({
+    cwd,
     slug,
-    basis: {
-      prd: {
-        path: relative(cwd, prdPath).replaceAll('\\', '/'),
-        sha1: computeGitBlobSha1(prdContent),
-      },
-      testSpecs: [{
-        path: relative(cwd, testSpecPath).replaceAll('\\', '/'),
-        sha1: computeGitBlobSha1(testSpecContent),
-      }],
-    },
-    entries: roles.map((role, index) => ({
-      path: `src/${role}-${index}.ts`,
-      roles: [role],
-    })),
-  }, null, 2));
+    prdPath,
+    testSpecPath,
+    entries: buildContextPackEntriesFromRoles(roles),
+    writeIndex: (['scope', 'build', 'verify'] as const).every((role) => roles.includes(role)),
+  });
 }
 
 async function writeReadyContextPack(

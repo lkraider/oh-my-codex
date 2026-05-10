@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import {
@@ -16,6 +15,12 @@ import {
 import { buildRalphAppendInstructions } from '../../cli/ralph.js';
 import { createTeamExecStage } from '../../pipeline/stages/team-exec.js';
 import type { StageContext } from '../../pipeline/types.js';
+import {
+  buildContextPackOutcome,
+  canonicalContextPackRelativePath,
+  type TestContextPackRole,
+  writeContextPackFixture,
+} from './context-pack-fixtures.js';
 
 type LifecycleStatus =
   | 'missing-baseline'
@@ -23,8 +28,6 @@ type LifecycleStatus =
   | 'incomplete'
   | 'invalid'
   | 'ready';
-
-type ContextPackRole = 'scope' | 'build' | 'verify';
 
 interface LifecycleFixture {
   status: LifecycleStatus;
@@ -53,26 +56,8 @@ const READY_ROLE_REFS = {
 
 let tempDir: string;
 
-function computeGitBlobSha1(content: string): string {
-  const buffer = Buffer.from(content, 'utf-8');
-  const header = Buffer.from(`blob ${buffer.length}\0`, 'utf-8');
-  return createHash('sha1').update(header).update(buffer).digest('hex');
-}
-
 function relativeToRepo(path: string): string {
   return relative(tempDir, path).replaceAll('\\', '/');
-}
-
-function canonicalContextPackRelativePath(slug: string): string {
-  return `.omx/context/context-20260507T120000Z-${slug}.json`;
-}
-
-function buildContextPackOutcome(relativePackPath: string): string {
-  return [
-    '## Context Pack Outcome',
-    '',
-    `- pack: created \`${relativePackPath}\``,
-  ].join('\n');
 }
 
 function decodeRuntimeCliInstructionPayload(instruction: string): Record<string, unknown> {
@@ -81,7 +66,7 @@ function decodeRuntimeCliInstructionPayload(instruction: string): Record<string,
   return JSON.parse(Buffer.from(match[1], 'base64url').toString('utf-8')) as Record<string, unknown>;
 }
 
-function expectedMissingRoles(status: LifecycleStatus): string[] {
+function expectedMissingRoles(status: LifecycleStatus): readonly TestContextPackRole[] {
   return status === 'incomplete' ? ['build', 'verify'] : [];
 }
 
@@ -127,32 +112,23 @@ async function writeContextPack(
   slug: string,
   prdPath: string,
   testSpecPath: string,
-  roles: readonly ContextPackRole[],
+  roles: readonly TestContextPackRole[],
 ): Promise<string> {
-  const contextDir = join(tempDir, '.omx', 'context');
-  await mkdir(contextDir, { recursive: true });
-
-  const packPath = join(tempDir, canonicalContextPackRelativePath(slug));
-  const prdContent = await readFile(prdPath, 'utf-8');
-  const testSpecContent = await readFile(testSpecPath, 'utf-8');
-  await writeFile(packPath, JSON.stringify({
+  return await writeContextPackFixture({
+    cwd: tempDir,
     slug,
-    basis: {
-      prd: {
-        path: relativeToRepo(prdPath),
-        sha1: computeGitBlobSha1(prdContent),
-      },
-      testSpecs: [{
-        path: relativeToRepo(testSpecPath),
-        sha1: computeGitBlobSha1(testSpecContent),
-      }],
-    },
+    prdPath,
+    testSpecPath,
     entries: roles.map((role) => ({
       path: `src/${role}.ts`,
       roles: [role],
     })),
-  }, null, 2));
-  return packPath;
+    writeIndex: (['scope', 'build', 'verify'] as const).every((role) => roles.includes(role)),
+  });
+}
+
+function expectedGeneratedIndexState(status: LifecycleStatus): 'unknown' | 'ready' {
+  return status === 'ready' ? 'ready' : 'unknown';
 }
 
 async function writeLifecycleFixture(status: LifecycleStatus): Promise<LifecycleFixture> {
@@ -326,6 +302,7 @@ describe('approved execution lifecycle matrix', () => {
       const selection = readLatestPlanningArtifacts(tempDir);
       assert.equal(selection.prdPath, fixture.prdPath);
       assert.equal(selection.contextPackStatus, status);
+      assert.equal(selection.generatedIndexState, expectedGeneratedIndexState(status));
       assert.deepEqual(selection.contextPack, expectedContextPack(status, fixture.packPath));
       assert.deepEqual(selection.contextPackRoleRefs, status === 'ready' ? READY_ROLE_REFS : null);
       assert.deepEqual(selection.missingRequiredContextPackRoles, expectedMissingRoles(status));
@@ -338,6 +315,7 @@ describe('approved execution lifecycle matrix', () => {
       assert.equal(teamHint.task, fixture.teamTask);
       assert.equal(teamHint.command, fixture.teamCommand);
       assert.equal(teamHint.contextPackStatus, status);
+      assert.equal(teamHint.generatedIndexState, expectedGeneratedIndexState(status));
       assert.deepEqual(teamHint.contextPack, expectedContextPack(status, fixture.packPath));
       assert.deepEqual(teamHint.contextPackRoleRefs, status === 'ready' ? READY_ROLE_REFS : null);
       assert.deepEqual(teamHint.missingRequiredContextPackRoles, expectedMissingRoles(status));
@@ -350,6 +328,7 @@ describe('approved execution lifecycle matrix', () => {
       assert.equal(ralphHint.task, fixture.ralphTask);
       assert.equal(ralphHint.command, fixture.ralphCommand);
       assert.equal(ralphHint.contextPackStatus, status);
+      assert.equal(ralphHint.generatedIndexState, expectedGeneratedIndexState(status));
       assert.deepEqual(ralphHint.contextPack, expectedContextPack(status, fixture.packPath));
       assert.deepEqual(ralphHint.contextPackRoleRefs, status === 'ready' ? READY_ROLE_REFS : null);
       assert.deepEqual(ralphHint.missingRequiredContextPackRoles, expectedMissingRoles(status));
